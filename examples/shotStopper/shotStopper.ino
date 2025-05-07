@@ -21,55 +21,79 @@
 
 */
 
-#include <AcaiaArduinoBLE.h>
+#include "AcaiaArduinoBLE.h"
 #include <EEPROM.h>
+#include "OTASetup.h"
 
+#define FIRMWARE_VERSION 2
 #define MAX_OFFSET 5                // In case an error in brewing occured
-#define MIN_SHOT_DURATION_S 3       //Useful for flushing the group.
-                                    // This ensure that the system will ignore
-                                    // "shots" that last less than this duration
-#define MAX_SHOT_DURATION_S 50      //Primarily useful for latching switches, since user
-                                    // looses control of the paddle once the system
-                                    // latches.
 #define BUTTON_READ_PERIOD_MS 5
-#define DRIP_DELAY_S          3     // Time after the shot ended to measure the final weight
 
-#define EEPROM_SIZE 2  // This is 1-Byte
-#define WEIGHT_ADDR 0  // Use the first byte of EEPROM to store the goal weight
-#define OFFSET_ADDR 1  
+#define EEPROM_SIZE 75
+#define SIGNATURE_ADDR 0 // Use the first byte to store a magic number/signature to know if the memory has been initialized
+#define ENABLED_ADDR 1
+#define WEIGHT_ADDR 2 // Use the second byte of EEPROM to store the goal weight
+#define OFFSET_ADDR 3 
+#define MOMENTARY_ADDR 4 
+#define REEDSWITCH_ADDR 5 
+#define AUTOTARE_ADDR 6
+#define MIN_SHOT_DURATION_S_ADDR 7
+#define MAX_SHOT_DURATION_S_ADDR 8 
+#define DRIP_DELAY_S_ADDR 9
+#define WIFI_SSID_ADDR 10
+#define WIFI_PASS_ADDR 42
+#define SIGNATURE_VALUE 0xAA
 
 #define DEBUG false
 
 #define N 10                        // Number of datapoints used to calculate trend line
 
-//User defined***
-#define MOMENTARY false        //Define brew switch style. 
-                              // True for momentary switches such as GS3 AV, Silvia Pro
-                              // false for latching switches such as Linea Mini/Micra
-#define REEDSWITCH false      // Set to true if the brew state is being determined 
-                              //  by a reed switch attached to the brew solenoid
-#define AUTOTARE true         // Automatically tare when shot is started 
-                              //  and 3 seconds after a latching switch brew 
-                              // (as defined by MOMENTARY)
-//***************
+
+// Reduce CPU clock to lower V3 power draw (~130mA→100mA)
+#define LOW_VOLTAGE false
+
+#define LED_RED     46
+#define LED_BLUE    45
+#define LED_GREEN   47
+#define LED_BUILTIN 48
 
 // Board Hardware 
 #ifdef ARDUINO_ESP32S3_DEV
-  #define LED_RED     46
-  #define LED_BLUE    45
-  #define LED_GREEN   47
-  #define LED_BUILTIN 48
   #define IN          21
   #define OUT         38
   #define REED_IN     18
 #else //todo: find nano esp32 identifier
   //LED's are defined by framework
-  #define IN          10
-  #define OUT         11
-  #define REED_IN     9
+  #define IN          33
+  #define OUT         5
+  #define REED_IN     34
 #endif 
 
 #define BUTTON_STATE_ARRAY_LENGTH 31
+
+// configuration variables
+bool reedSwitch = false;            // Set to true if the brew state is being determined 
+                                    // by a reed switch attached to the brew solenoid
+bool momentary = false;             // Define brew switch style. 
+                                    // True for momentary switches such as GS3 AV, Silvia Pro
+                                    // false for latching switches such as Linea Mini/Micra
+bool autoTare = true;               // Automatically tare when shot is started 
+                                    // and 3 seconds after a latching switch brew 
+                                    // (as defined by MOMENTARY)
+uint8_t minShotDurationS = 3;       // Useful for flushing the group.
+                                    // This ensure that the system will ignore
+                                    // "shots" that last less than this duration
+uint8_t maxShotDurationS = 50;      // Primarily useful for latching switches, since user
+                                    // looses control of the paddle once the system
+                                    // latches.
+uint8_t dripDelayS = 3;             // Time after the shot ended to measure the final weight
+
+bool otaModeRequested = false;      // Set to true if OTA mode is being requested.
+
+bool enabled = true;                // The shotStopper status, if disabled it won't connect to 
+                                    // the scale nor it will take over the brew.
+String wifiSsid = "";
+String wifiPass = "";
 
 typedef enum {BUTTON, WEIGHT, TIME, UNDEF} ENDTYPE;
 
@@ -92,7 +116,7 @@ float error = 0;
 int buttonArr[BUTTON_STATE_ARRAY_LENGTH];            // last 4 readings of the button
 
 // button 
-int in = REEDSWITCH ? REED_IN : IN;
+int in = reedSwitch ? REED_IN : IN;
 bool buttonPressed = false; //physical status of button
 bool buttonLatched = false; //electrical status of button
 unsigned long lastButtonRead_ms = 0;
@@ -114,35 +138,250 @@ struct Shot {
 Shot shot = {0,0,0,0,{},{},0,false,ENDTYPE::UNDEF};
 
 //BLE peripheral device
-BLEService weightService("0x0FFE"); // create service
+BLEService shotStopperService("0x0FFE"); // create service
+BLEByteCharacteristic enabledCharacteristic("0xFF10",  BLEWrite | BLERead);
 BLEByteCharacteristic weightCharacteristic("0xFF11",  BLEWrite | BLERead);
+BLEByteCharacteristic reedSwitchCharacteristic("0xFF12",  BLEWrite | BLERead);
+BLEByteCharacteristic momentaryCharacteristic("0xFF13",  BLEWrite | BLERead);
+BLEByteCharacteristic autoTareCharacteristic("0xFF14",  BLEWrite | BLERead);
+BLEByteCharacteristic minShotDurationSCharacteristic("0xFF15",  BLEWrite | BLERead);
+BLEByteCharacteristic maxShotDurationSCharacteristic("0xFF16",  BLEWrite | BLERead);
+BLEByteCharacteristic dripDelaySCharacteristic("0xFF17",  BLEWrite | BLERead);
+BLEByteCharacteristic firmwareVersionCharacteristic("0xFF18",  BLERead);
+BLEByteCharacteristic scaleStatusCharacteristic("0xFF19",  BLERead | BLENotify);
+BLEByteCharacteristic shotStatusCharacteristic("0xFF20",  BLERead | BLENotify);
+BLEByteCharacteristic otaModeRequestedCharacteristic("0xFF21",  BLEWrite | BLERead);
+BLECharacteristic wifiSsidCharacteristic("0xFF22",  BLEWrite | BLERead, 32);
+BLECharacteristic wifiPassCharacteristic("0xFF23",  BLEWrite, 32);
+BLECharacteristic wifiIpCharacteristic("0xFF24",  BLERead | BLENotify, 16);
+
+
+enum ScaleStatus {
+  STATUS_DISCONNECTED = 0,
+  STATUS_CONNECTED = 1,
+};
+
+uint8_t lastScaleStatus = 255; // Invalid initial value to force first update
+static uint8_t lastShotStatusValue = 0xFF; // Initialize with a value that is unlikely to be a valid status
+String lastWifiIp = "empty";
+
+void updateScaleStatus(uint8_t newScaleStatus) {
+  if (newScaleStatus != lastScaleStatus) {
+    scaleStatusCharacteristic.writeValue(newScaleStatus);
+    lastScaleStatus = newScaleStatus;
+  }
+}
+
+void updateBLEShotStatus(bool brewing) {
+  uint8_t newValue = brewing ? 1 : 0;
+  if (newValue != lastShotStatusValue) {
+    shotStatusCharacteristic.writeValue(newValue);
+    lastShotStatusValue = newValue; // Update the last written value
+  }
+}
+
+void updateBLEWifiIp() {
+  String wifiIp = getWifiIp();
+  if (wifiIp != lastWifiIp) {
+    writeStringToCharacteristic(wifiIpCharacteristic, wifiIp);
+    lastWifiIp = wifiIp;
+  }
+}
+
+void writeStringToEEPROM(int startAddress, const String &str) {
+    for (int i = 0; i < str.length(); i++) {
+        EEPROM.write(startAddress + i, str[i]);
+    }
+    EEPROM.write(startAddress + str.length(), '\0'); // Null-terminate the string
+}
+
+String readStringFromEEPROM(int startAddress, int maxLength) {
+    char data[maxLength + 1]; // +1 for the null terminator
+    int length = 0;
+
+    for (int i = 0; i < maxLength; i++) {
+        data[i] = EEPROM.read(startAddress + i);
+        if (data[i] == '\0') {
+            break;
+        }
+        length++;
+    }
+    data[length] = '\0'; // Ensure the string is null-terminated
+
+    return String(data);
+}
+
+void writeStringToCharacteristic(BLECharacteristic& characteristic, const String& str) {
+    const char* data = str.c_str();
+    int length = str.length();
+    characteristic.writeValue((const uint8_t*)data, length);
+}
+
+void loadOrInitEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
+  if (EEPROM.read(SIGNATURE_ADDR) != SIGNATURE_VALUE) {
+    goalWeight = 36;
+    weightOffset = 1.5;
+    EEPROM.write(SIGNATURE_ADDR, SIGNATURE_VALUE);
+    EEPROM.write(ENABLED_ADDR, enabled ? 1 : 0);
+    EEPROM.write(WEIGHT_ADDR, goalWeight);
+    EEPROM.write(OFFSET_ADDR, (uint8_t)(weightOffset * 10));
+    EEPROM.write(MOMENTARY_ADDR, momentary ? 1 : 0);
+    EEPROM.write(REEDSWITCH_ADDR, reedSwitch ? 1 : 0);
+    EEPROM.write(AUTOTARE_ADDR, autoTare ? 1 : 0);
+    EEPROM.write(MIN_SHOT_DURATION_S_ADDR, minShotDurationS);
+    EEPROM.write(MAX_SHOT_DURATION_S_ADDR, maxShotDurationS);
+    EEPROM.write(DRIP_DELAY_S_ADDR, dripDelayS);
+    writeStringToEEPROM(WIFI_SSID_ADDR, wifiSsid);
+    writeStringToEEPROM(WIFI_PASS_ADDR, wifiPass);
+    EEPROM.commit();
+    Serial.println("EEPROM initialized with defaults");
+  } else {
+    enabled = EEPROM.read(ENABLED_ADDR);
+    goalWeight = EEPROM.read(WEIGHT_ADDR);
+    weightOffset = EEPROM.read(OFFSET_ADDR) / 10.0;
+    Serial.print("Goal Weight retrieved: ");
+    Serial.println(goalWeight);
+    Serial.print("Offset retrieved: ");
+    Serial.println(weightOffset);
+    momentary = EEPROM.read(MOMENTARY_ADDR) != 0;
+    reedSwitch = EEPROM.read(REEDSWITCH_ADDR) != 0;
+    in = reedSwitch ? REED_IN : IN;
+    autoTare = EEPROM.read(AUTOTARE_ADDR) != 0;
+    minShotDurationS = EEPROM.read(MIN_SHOT_DURATION_S_ADDR);
+    maxShotDurationS = EEPROM.read(MAX_SHOT_DURATION_S_ADDR);
+    dripDelayS = EEPROM.read(DRIP_DELAY_S_ADDR);
+    wifiSsid = readStringFromEEPROM(WIFI_SSID_ADDR, 32);
+    wifiPass = readStringFromEEPROM(WIFI_PASS_ADDR, 32);
+  }
+}
+
+void initializeBLE() {
+  BLE.begin();
+  BLE.setLocalName("shotStopper");
+  BLE.setDeviceName("shotStopper");
+  BLE.setAdvertisedService(shotStopperService);
+  shotStopperService.addCharacteristic(enabledCharacteristic);
+  shotStopperService.addCharacteristic(weightCharacteristic);
+  shotStopperService.addCharacteristic(momentaryCharacteristic);
+  shotStopperService.addCharacteristic(reedSwitchCharacteristic);
+  shotStopperService.addCharacteristic(autoTareCharacteristic);
+  shotStopperService.addCharacteristic(minShotDurationSCharacteristic);
+  shotStopperService.addCharacteristic(maxShotDurationSCharacteristic);
+  shotStopperService.addCharacteristic(dripDelaySCharacteristic);
+  shotStopperService.addCharacteristic(firmwareVersionCharacteristic);
+  shotStopperService.addCharacteristic(scaleStatusCharacteristic);
+  shotStopperService.addCharacteristic(shotStatusCharacteristic);
+  shotStopperService.addCharacteristic(otaModeRequestedCharacteristic);
+  shotStopperService.addCharacteristic(wifiSsidCharacteristic);
+  shotStopperService.addCharacteristic(wifiPassCharacteristic);
+  shotStopperService.addCharacteristic(wifiIpCharacteristic);
+  BLE.addService(shotStopperService);
+  enabledCharacteristic.writeValue(enabled ? 1 : 0);
+  weightCharacteristic.writeValue(goalWeight);
+  momentaryCharacteristic.writeValue(momentary ? 1 : 0);
+  reedSwitchCharacteristic.writeValue(reedSwitch ? 1 : 0);
+  autoTareCharacteristic.writeValue(autoTare ? 1 : 0);
+  minShotDurationSCharacteristic.writeValue(minShotDurationS);
+  maxShotDurationSCharacteristic.writeValue(maxShotDurationS);
+  dripDelaySCharacteristic.writeValue(dripDelayS);
+  firmwareVersionCharacteristic.writeValue(FIRMWARE_VERSION);
+  scaleStatusCharacteristic.writeValue(STATUS_DISCONNECTED);
+  shotStatusCharacteristic.writeValue(0);
+  otaModeRequestedCharacteristic.writeValue(otaModeRequested ? 1 : 0);
+  writeStringToCharacteristic(wifiSsidCharacteristic, wifiSsid);
+  writeStringToCharacteristic(wifiIpCharacteristic, lastWifiIp);
+  BLE.advertise();
+  Serial.println("Bluetooth® device active, waiting for connections...");
+  BLE.setEventHandler(BLEDisconnected, blePeripheralDisconnectHandler);
+}
+
+void blePeripheralDisconnectHandler(BLEDevice central) {
+  BLE.advertise();
+}
+
+void pollAndReadBLE() {
+  bool updated = false;
+  BLE.poll();
+  if (enabledCharacteristic.written()) {
+    enabled = enabledCharacteristic.value() != 0;
+    EEPROM.write(ENABLED_ADDR, enabled ? 1 : 0);
+    updated = true;
+  }
+  if (weightCharacteristic.written()) {
+    Serial.print("goal weight updated from ");
+    Serial.print(goalWeight);
+    Serial.print(" to ");
+    goalWeight = weightCharacteristic.value();
+    Serial.println(goalWeight);
+    EEPROM.write(WEIGHT_ADDR, goalWeight); //1 byte, 0-255
+    updated = true;
+    EEPROM.commit();
+  }
+  if (momentaryCharacteristic.written()) {
+    momentary = momentaryCharacteristic.value() != 0;
+    EEPROM.write(MOMENTARY_ADDR, momentary ? 1 : 0);
+    updated = true;
+  }
+  if (reedSwitchCharacteristic.written()) {
+    reedSwitch = reedSwitchCharacteristic.value() != 0;
+    in = reedSwitch ? REED_IN : IN;
+    EEPROM.write(REEDSWITCH_ADDR, reedSwitch ? 1 : 0);
+    updated = true;
+  }
+  if (autoTareCharacteristic.written()) {
+    autoTare = autoTareCharacteristic.value() != 0;
+    EEPROM.write(AUTOTARE_ADDR, autoTare ? 1 : 0);
+    updated = true;
+  }
+  if (minShotDurationSCharacteristic.written()) {
+    minShotDurationS = minShotDurationSCharacteristic.value();
+    EEPROM.write(MIN_SHOT_DURATION_S_ADDR, minShotDurationS);
+    updated = true;
+  }
+  if (maxShotDurationSCharacteristic.written()) {
+    maxShotDurationS = maxShotDurationSCharacteristic.value();
+    EEPROM.write(MAX_SHOT_DURATION_S_ADDR, maxShotDurationS);
+    updated = true;
+  }
+  if (dripDelaySCharacteristic.written()) {
+    dripDelayS = dripDelaySCharacteristic.value();
+    EEPROM.write(DRIP_DELAY_S_ADDR, dripDelayS);
+    updated = true;
+  }
+  if (otaModeRequestedCharacteristic.written()) {
+    otaModeRequested = otaModeRequestedCharacteristic.value() != 0;
+    Serial.print("OTA mode requested: ");
+    Serial.println(otaModeRequested);
+  }
+  if (wifiSsidCharacteristic.written()) {
+    const uint8_t* ssidData = wifiSsidCharacteristic.value();
+    int ssidLength = wifiSsidCharacteristic.valueLength();
+    wifiSsid = String((const char*)ssidData, ssidLength);
+    writeStringToEEPROM(WIFI_SSID_ADDR, wifiSsid);
+    updated = true;
+  }
+  if (wifiPassCharacteristic.written()) {
+    const uint8_t* passData = wifiPassCharacteristic.value();
+    int passLength = wifiPassCharacteristic.valueLength();
+    wifiPass = String((const char*)passData, passLength);
+    writeStringToEEPROM(WIFI_PASS_ADDR, wifiPass);
+    updated = true;
+  }
+  if (updated) {
+    EEPROM.commit();
+  }
+}
 
 void setup() {
+#ifdef LOW_VOLTAGE
   setCpuFrequencyMhz(80);
+#endif
   Serial.begin(9600);
-  EEPROM.begin(EEPROM_SIZE);
 
-  // Get stored setpoint and offset
-  goalWeight = EEPROM.read(WEIGHT_ADDR);
-  weightOffset = EEPROM.read(OFFSET_ADDR)/10.0;
-  Serial.print("Goal Weight retrieved: ");
-  Serial.println(goalWeight);
-  Serial.print("offset retrieved: ");
-  Serial.println(goalWeight);
+  // If eeprom isn't initialized default to 36g/1.5g
+  loadOrInitEEPROM();
 
-  //If eeprom isn't initialized and has an 
-  // unreasonable weight/offset, default to 36g/1.5g
-  if( (goalWeight < 10) || (goalWeight > 200) ){
-    goalWeight = 36;
-    Serial.print("Goal Weight set to: ");
-    Serial.println(goalWeight);
-  }
-  if(weightOffset > MAX_OFFSET){
-    weightOffset = 1.5;
-    Serial.print("Offset set to: ");
-    Serial.println(weightOffset);
-  }
-  
   // initialize the GPIO hardware
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(in, INPUT_PULLUP);
@@ -153,21 +392,34 @@ void setup() {
   setColor(OFF);
 
   // initialize the BLE hardware
-  BLE.begin();
-  BLE.setLocalName("shotStopper");
-  BLE.setAdvertisedService(weightService);
-  weightService.addCharacteristic(weightCharacteristic);
-  BLE.addService(weightService);
-  weightCharacteristic.writeValue(goalWeight);
-  BLE.advertise();
-  Serial.println("Bluetooth® device active, waiting for connections...");
+  initializeBLE();
 }
 
+
+
 void loop() {
+  // Check for setpoint updates
+  pollAndReadBLE();
+  updateBLEShotStatus(shot.brewing);
+  updateBLEWifiIp();
+  // If shotStopper is disabled or OTA mode is requested, stop the shot and disconnect from the scale
+  if (!enabled || checkOTAMode(otaModeRequested, wifiSsid, wifiPass)) {
+    if(shot.brewing){
+      shot.end = ENDTYPE::TIME;
+      shot.brewing = false;
+      setBrewingState(false);
+    }
+    if (scale.isConnected()) {
+      scale.disconnect();
+      updateScaleStatus(STATUS_DISCONNECTED);
+      setColor(RED);
+    }
+    return;
+  }
 
   // Connect to scale
-  while(!scale.isConnected()){
-
+  if (!scale.isConnected()) {
+    updateScaleStatus(STATUS_DISCONNECTED);
     setColor(RED);
     scale.init(); 
     currentWeight = 0;
@@ -176,19 +428,12 @@ void loop() {
     }
     if(scale.isConnected()){
       setColor(YELLOW);
+      updateScaleStatus(STATUS_CONNECTED);
+    } else {
+      return;
     }
-  }
-
-  // Check for setpoint updates
-  BLE.poll();
-  if (weightCharacteristic.written()) {
-    Serial.print("goal weight updated from ");
-    Serial.print(goalWeight);
-    Serial.print(" to ");
-    goalWeight = weightCharacteristic.value();
-    Serial.println(goalWeight);
-    EEPROM.write(WEIGHT_ADDR, goalWeight); //1 byte, 0-255
-    EEPROM.commit();
+  } else {
+    updateScaleStatus(STATUS_CONNECTED);
   }
 
   // Send a heartbeat message to the scale periodically to maintain connection
@@ -200,7 +445,6 @@ void loop() {
   // otherwise getWeight() will return stale data
   if(scale.newWeightAvailable()){
     currentWeight = scale.getWeight();
-
     Serial.print(currentWeight);
 
     if(!shot.brewing){
@@ -247,7 +491,7 @@ void loop() {
       //Serial.print(buttonArr[i]);
     }
     //Serial.println();
-    if(REEDSWITCH && !shot.brewing && seconds_f() < (shot.start_timestamp_s + shot.end_s + 0.5)){
+    if(reedSwitch && !shot.brewing && seconds_f() < (shot.start_timestamp_s + shot.end_s + 0.5)){
       newButtonState = 0;
     }
   }
@@ -256,23 +500,23 @@ void loop() {
   if(newButtonState && buttonPressed == false ){
     Serial.println("ButtonPressed");
     buttonPressed = true;
-    if(!MOMENTARY){
+    if(!momentary){
       shot.brewing = true;
       setBrewingState(shot.brewing);
     }
   }
     
   // button held. Take over for the rest of the shot.
-  else if(!MOMENTARY 
+  else if(!momentary 
   && shot.brewing 
   && !buttonLatched 
-  && (shot.shotTimer > MIN_SHOT_DURATION_S) 
+  && (shot.shotTimer > minShotDurationS) 
   ){
     buttonLatched = true;
     Serial.println("Button Latched");
     digitalWrite(OUT,HIGH); Serial.println("wrote high");
     // Get the scale to beep to inform user.
-    if(AUTOTARE){
+    if(autoTare){
       scale.tare();
     }
   }
@@ -290,9 +534,9 @@ void loop() {
     }
     setBrewingState(shot.brewing);
   }
-    
+
   //Max duration reached
-  else if(shot.brewing && shot.shotTimer > MAX_SHOT_DURATION_S ){
+  else if(shot.brewing && shot.shotTimer > maxShotDurationS ){
     shot.brewing = false;
     Serial.println("Max brew duration reached");
     shot.end = ENDTYPE::TIME;
@@ -307,7 +551,7 @@ void loop() {
   //End shot
   if(shot.brewing 
   && shot.shotTimer >= shot.expected_end_s
-  && shot.shotTimer >  MIN_SHOT_DURATION_S
+  && shot.shotTimer >  minShotDurationS
   ){
     Serial.println("weight achieved");
     shot.brewing = false;
@@ -319,7 +563,7 @@ void loop() {
   if(shot.start_timestamp_s
   && shot.end_s
   && currentWeight >= (goalWeight - weightOffset)
-  && seconds_f() > shot.start_timestamp_s + shot.end_s + DRIP_DELAY_S){
+  && seconds_f() > shot.start_timestamp_s + shot.end_s + dripDelayS){
     shot.start_timestamp_s = 0;
     shot.end_s = 0;
 
@@ -332,12 +576,10 @@ void loop() {
 
     if( abs(currentWeight - goalWeight + weightOffset) > MAX_OFFSET ){
       Serial.print("g. Error assumed. Offset unchanged. ");
-    }
-    else{
+    }else{
       Serial.print("g. Next time I'll create an offset of ");
       weightOffset += currentWeight - goalWeight;
       Serial.print(weightOffset);
-
       EEPROM.write(OFFSET_ADDR, weightOffset*10); //1 byte, 0-255
       EEPROM.commit();
     }
@@ -353,7 +595,7 @@ void setBrewingState(bool brewing){
     shot.datapoints = 0;
     scale.resetTimer();
     scale.startTimer();
-    if(AUTOTARE){
+    if(autoTare){
       scale.tare();
     }
     Serial.println("Weight Timer End");
@@ -376,13 +618,13 @@ void setBrewingState(bool brewing){
 
     shot.end_s = seconds_f() - shot.start_timestamp_s;
     scale.stopTimer();
-    if(MOMENTARY &&
+    if(momentary &&
       (ENDTYPE::WEIGHT == shot.end || ENDTYPE::TIME == shot.end)){
       //Pulse button to stop brewing
       digitalWrite(OUT,HIGH);Serial.println("wrote high");
       delay(300);
       digitalWrite(OUT,LOW);Serial.println("wrote low");
-    }else if(!MOMENTARY){
+    }else if(!momentary){
       buttonLatched = false;
       buttonPressed = false;
       Serial.println("Button Unlatched and not pressed");
@@ -397,7 +639,7 @@ void calculateEndTime(Shot* s){
   
   // Do not  predict end time if there aren't enough espresso measurements yet
   if( (s->datapoints < N) || (s->weight[s->datapoints-1] < 10) ){
-    s->expected_end_s = MAX_SHOT_DURATION_S;
+    s->expected_end_s = maxShotDurationS;
   }
   else{
     //Get line of best fit (y=mx+b) from the last 10 measurements 
