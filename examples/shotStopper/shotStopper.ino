@@ -21,44 +21,52 @@
 
 */
 
-#include <AcaiaArduinoBLE.h>
+#include "AcaiaArduinoBLE.h"
 #include <EEPROM.h>
-#include "ota_setup.h"
+#include "OTASetup.h"
 
-#define FIRMWARE_VERSION 1
+#define FIRMWARE_VERSION 2
 #define MAX_OFFSET 5                // In case an error in brewing occured
 #define BUTTON_READ_PERIOD_MS 5
 
-#define EEPROM_SIZE 9
+#define EEPROM_SIZE 75
 #define SIGNATURE_ADDR 0 // Use the first byte to store a magic number/signature to know if the memory has been initialized
-#define WEIGHT_ADDR 1 // Use the second byte of EEPROM to store the goal weight
-#define OFFSET_ADDR 2 
-#define MOMENTARY_ADDR 3 
-#define REEDSWITCH_ADDR 4 
-#define AUTOTARE_ADDR 5 
-#define MIN_SHOT_DURATION_S_ADDR 6
-#define MAX_SHOT_DURATION_S_ADDR 7 
-#define DRIP_DELAY_S_ADDR 8
+#define ENABLED_ADDR 1
+#define WEIGHT_ADDR 2 // Use the second byte of EEPROM to store the goal weight
+#define OFFSET_ADDR 3 
+#define MOMENTARY_ADDR 4 
+#define REEDSWITCH_ADDR 5 
+#define AUTOTARE_ADDR 6
+#define MIN_SHOT_DURATION_S_ADDR 7
+#define MAX_SHOT_DURATION_S_ADDR 8 
+#define DRIP_DELAY_S_ADDR 9
+#define WIFI_SSID_ADDR 10
+#define WIFI_PASS_ADDR 42
 #define SIGNATURE_VALUE 0xAA
 
 #define DEBUG false
 
 #define N 10                        // Number of datapoints used to calculate trend line
 
+
+// Reduce CPU clock to lower V3 power draw (~130mA→100mA)
+#define LOW_VOLTAGE false
+
+#define LED_RED     46
+#define LED_BLUE    45
+#define LED_GREEN   47
+#define LED_BUILTIN 48
+
 // Board Hardware 
 #ifdef ARDUINO_ESP32S3_DEV
-  #define LED_RED     46
-  #define LED_BLUE    45
-  #define LED_GREEN   47
-  #define LED_BUILTIN 48
   #define IN          21
   #define OUT         38
   #define REED_IN     18
 #else //todo: find nano esp32 identifier
   //LED's are defined by framework
-  #define IN          10
-  #define OUT         11
-  #define REED_IN     9
+  #define IN          33
+  #define OUT         5
+  #define REED_IN     34
 #endif 
 
 #define BUTTON_STATE_ARRAY_LENGTH 31
@@ -79,7 +87,13 @@ uint8_t maxShotDurationS = 50;      // Primarily useful for latching switches, s
                                     // looses control of the paddle once the system
                                     // latches.
 uint8_t dripDelayS = 3;             // Time after the shot ended to measure the final weight
+
 bool otaModeRequested = false;      // Set to true if OTA mode is being requested.
+
+bool enabled = true;                // The shotStopper status, if disabled it won't connect to 
+                                    // the scale nor it will take over the brew.
+String wifiSsid = "";
+String wifiPass = "";
 
 typedef enum {BUTTON, WEIGHT, TIME, UNDEF} ENDTYPE;
 
@@ -125,6 +139,7 @@ Shot shot = {0,0,0,0,{},{},0,false,ENDTYPE::UNDEF};
 
 //BLE peripheral device
 BLEService shotStopperService("0x0FFE"); // create service
+BLEByteCharacteristic enabledCharacteristic("0xFF10",  BLEWrite | BLERead);
 BLEByteCharacteristic weightCharacteristic("0xFF11",  BLEWrite | BLERead);
 BLEByteCharacteristic reedSwitchCharacteristic("0xFF12",  BLEWrite | BLERead);
 BLEByteCharacteristic momentaryCharacteristic("0xFF13",  BLEWrite | BLERead);
@@ -134,7 +149,12 @@ BLEByteCharacteristic maxShotDurationSCharacteristic("0xFF16",  BLEWrite | BLERe
 BLEByteCharacteristic dripDelaySCharacteristic("0xFF17",  BLEWrite | BLERead);
 BLEByteCharacteristic firmwareVersionCharacteristic("0xFF18",  BLERead);
 BLEByteCharacteristic scaleStatusCharacteristic("0xFF19",  BLERead | BLENotify);
-BLEByteCharacteristic otaModeRequestedCharacteristic("0xFF20",  BLEWrite | BLERead);
+BLEByteCharacteristic shotStatusCharacteristic("0xFF20",  BLERead | BLENotify);
+BLEByteCharacteristic otaModeRequestedCharacteristic("0xFF21",  BLEWrite | BLERead);
+BLECharacteristic wifiSsidCharacteristic("0xFF22",  BLEWrite | BLERead, 32);
+BLECharacteristic wifiPassCharacteristic("0xFF23",  BLEWrite, 32);
+BLECharacteristic wifiIpCharacteristic("0xFF24",  BLERead | BLENotify, 16);
+
 
 enum ScaleStatus {
   STATUS_DISCONNECTED = 0,
@@ -142,6 +162,8 @@ enum ScaleStatus {
 };
 
 uint8_t lastScaleStatus = 255; // Invalid initial value to force first update
+static uint8_t lastShotStatusValue = 0xFF; // Initialize with a value that is unlikely to be a valid status
+String lastWifiIp = "empty";
 
 void updateScaleStatus(uint8_t newScaleStatus) {
   if (newScaleStatus != lastScaleStatus) {
@@ -150,12 +172,58 @@ void updateScaleStatus(uint8_t newScaleStatus) {
   }
 }
 
+void updateBLEShotStatus(bool brewing) {
+  uint8_t newValue = brewing ? 1 : 0;
+  if (newValue != lastShotStatusValue) {
+    shotStatusCharacteristic.writeValue(newValue);
+    lastShotStatusValue = newValue; // Update the last written value
+  }
+}
+
+void updateBLEWifiIp() {
+  String wifiIp = getWifiIp();
+  if (wifiIp != lastWifiIp) {
+    writeStringToCharacteristic(wifiIpCharacteristic, wifiIp);
+    lastWifiIp = wifiIp;
+  }
+}
+
+void writeStringToEEPROM(int startAddress, const String &str) {
+    for (int i = 0; i < str.length(); i++) {
+        EEPROM.write(startAddress + i, str[i]);
+    }
+    EEPROM.write(startAddress + str.length(), '\0'); // Null-terminate the string
+}
+
+String readStringFromEEPROM(int startAddress, int maxLength) {
+    char data[maxLength + 1]; // +1 for the null terminator
+    int length = 0;
+
+    for (int i = 0; i < maxLength; i++) {
+        data[i] = EEPROM.read(startAddress + i);
+        if (data[i] == '\0') {
+            break;
+        }
+        length++;
+    }
+    data[length] = '\0'; // Ensure the string is null-terminated
+
+    return String(data);
+}
+
+void writeStringToCharacteristic(BLECharacteristic& characteristic, const String& str) {
+    const char* data = str.c_str();
+    int length = str.length();
+    characteristic.writeValue((const uint8_t*)data, length);
+}
+
 void loadOrInitEEPROM() {
   EEPROM.begin(EEPROM_SIZE);
   if (EEPROM.read(SIGNATURE_ADDR) != SIGNATURE_VALUE) {
     goalWeight = 36;
     weightOffset = 1.5;
     EEPROM.write(SIGNATURE_ADDR, SIGNATURE_VALUE);
+    EEPROM.write(ENABLED_ADDR, enabled ? 1 : 0);
     EEPROM.write(WEIGHT_ADDR, goalWeight);
     EEPROM.write(OFFSET_ADDR, (uint8_t)(weightOffset * 10));
     EEPROM.write(MOMENTARY_ADDR, momentary ? 1 : 0);
@@ -164,9 +232,12 @@ void loadOrInitEEPROM() {
     EEPROM.write(MIN_SHOT_DURATION_S_ADDR, minShotDurationS);
     EEPROM.write(MAX_SHOT_DURATION_S_ADDR, maxShotDurationS);
     EEPROM.write(DRIP_DELAY_S_ADDR, dripDelayS);
+    writeStringToEEPROM(WIFI_SSID_ADDR, wifiSsid);
+    writeStringToEEPROM(WIFI_PASS_ADDR, wifiPass);
     EEPROM.commit();
     Serial.println("EEPROM initialized with defaults");
   } else {
+    enabled = EEPROM.read(ENABLED_ADDR);
     goalWeight = EEPROM.read(WEIGHT_ADDR);
     weightOffset = EEPROM.read(OFFSET_ADDR) / 10.0;
     Serial.print("Goal Weight retrieved: ");
@@ -180,13 +251,17 @@ void loadOrInitEEPROM() {
     minShotDurationS = EEPROM.read(MIN_SHOT_DURATION_S_ADDR);
     maxShotDurationS = EEPROM.read(MAX_SHOT_DURATION_S_ADDR);
     dripDelayS = EEPROM.read(DRIP_DELAY_S_ADDR);
+    wifiSsid = readStringFromEEPROM(WIFI_SSID_ADDR, 32);
+    wifiPass = readStringFromEEPROM(WIFI_PASS_ADDR, 32);
   }
 }
 
 void initializeBLE() {
   BLE.begin();
   BLE.setLocalName("shotStopper");
+  BLE.setDeviceName("shotStopper");
   BLE.setAdvertisedService(shotStopperService);
+  shotStopperService.addCharacteristic(enabledCharacteristic);
   shotStopperService.addCharacteristic(weightCharacteristic);
   shotStopperService.addCharacteristic(momentaryCharacteristic);
   shotStopperService.addCharacteristic(reedSwitchCharacteristic);
@@ -196,8 +271,13 @@ void initializeBLE() {
   shotStopperService.addCharacteristic(dripDelaySCharacteristic);
   shotStopperService.addCharacteristic(firmwareVersionCharacteristic);
   shotStopperService.addCharacteristic(scaleStatusCharacteristic);
+  shotStopperService.addCharacteristic(shotStatusCharacteristic);
   shotStopperService.addCharacteristic(otaModeRequestedCharacteristic);
+  shotStopperService.addCharacteristic(wifiSsidCharacteristic);
+  shotStopperService.addCharacteristic(wifiPassCharacteristic);
+  shotStopperService.addCharacteristic(wifiIpCharacteristic);
   BLE.addService(shotStopperService);
+  enabledCharacteristic.writeValue(enabled ? 1 : 0);
   weightCharacteristic.writeValue(goalWeight);
   momentaryCharacteristic.writeValue(momentary ? 1 : 0);
   reedSwitchCharacteristic.writeValue(reedSwitch ? 1 : 0);
@@ -207,7 +287,10 @@ void initializeBLE() {
   dripDelaySCharacteristic.writeValue(dripDelayS);
   firmwareVersionCharacteristic.writeValue(FIRMWARE_VERSION);
   scaleStatusCharacteristic.writeValue(STATUS_DISCONNECTED);
+  shotStatusCharacteristic.writeValue(0);
   otaModeRequestedCharacteristic.writeValue(otaModeRequested ? 1 : 0);
+  writeStringToCharacteristic(wifiSsidCharacteristic, wifiSsid);
+  writeStringToCharacteristic(wifiIpCharacteristic, lastWifiIp);
   BLE.advertise();
   Serial.println("Bluetooth® device active, waiting for connections...");
   BLE.setEventHandler(BLEDisconnected, blePeripheralDisconnectHandler);
@@ -220,6 +303,11 @@ void blePeripheralDisconnectHandler(BLEDevice central) {
 void pollAndReadBLE() {
   bool updated = false;
   BLE.poll();
+  if (enabledCharacteristic.written()) {
+    enabled = enabledCharacteristic.value() != 0;
+    EEPROM.write(ENABLED_ADDR, enabled ? 1 : 0);
+    updated = true;
+  }
   if (weightCharacteristic.written()) {
     Serial.print("goal weight updated from ");
     Serial.print(goalWeight);
@@ -266,13 +354,29 @@ void pollAndReadBLE() {
     Serial.print("OTA mode requested: ");
     Serial.println(otaModeRequested);
   }
+  if (wifiSsidCharacteristic.written()) {
+    const uint8_t* ssidData = wifiSsidCharacteristic.value();
+    int ssidLength = wifiSsidCharacteristic.valueLength();
+    wifiSsid = String((const char*)ssidData, ssidLength);
+    writeStringToEEPROM(WIFI_SSID_ADDR, wifiSsid);
+    updated = true;
+  }
+  if (wifiPassCharacteristic.written()) {
+    const uint8_t* passData = wifiPassCharacteristic.value();
+    int passLength = wifiPassCharacteristic.valueLength();
+    wifiPass = String((const char*)passData, passLength);
+    writeStringToEEPROM(WIFI_PASS_ADDR, wifiPass);
+    updated = true;
+  }
   if (updated) {
     EEPROM.commit();
   }
 }
 
 void setup() {
+#ifdef LOW_VOLTAGE
   setCpuFrequencyMhz(80);
+#endif
   Serial.begin(9600);
 
   // If eeprom isn't initialized default to 36g/1.5g
@@ -296,8 +400,20 @@ void setup() {
 void loop() {
   // Check for setpoint updates
   pollAndReadBLE();
-
-  if (checkOTAMode(otaModeRequested)) {
+  updateBLEShotStatus(shot.brewing);
+  updateBLEWifiIp();
+  // If shotStopper is disabled or OTA mode is requested, stop the shot and disconnect from the scale
+  if (!enabled || checkOTAMode(otaModeRequested, wifiSsid, wifiPass)) {
+    if(shot.brewing){
+      shot.end = ENDTYPE::TIME;
+      shot.brewing = false;
+      setBrewingState(false);
+    }
+    if (scale.isConnected()) {
+      scale.disconnect();
+      updateScaleStatus(STATUS_DISCONNECTED);
+      setColor(RED);
+    }
     return;
   }
 
@@ -316,6 +432,8 @@ void loop() {
     } else {
       return;
     }
+  } else {
+    updateScaleStatus(STATUS_CONNECTED);
   }
 
   // Send a heartbeat message to the scale periodically to maintain connection
@@ -327,7 +445,6 @@ void loop() {
   // otherwise getWeight() will return stale data
   if(scale.newWeightAvailable()){
     currentWeight = scale.getWeight();
-
     Serial.print(currentWeight);
 
     if(!shot.brewing){
@@ -417,7 +534,7 @@ void loop() {
     }
     setBrewingState(shot.brewing);
   }
-    
+
   //Max duration reached
   else if(shot.brewing && shot.shotTimer > maxShotDurationS ){
     shot.brewing = false;
