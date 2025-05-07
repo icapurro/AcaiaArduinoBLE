@@ -52,21 +52,20 @@
 // Reduce CPU clock to lower V3 power draw (~130mA→100mA)
 #define LOW_VOLTAGE false
 
-#define LED_RED     46
-#define LED_BLUE    45
-#define LED_GREEN   47
-#define LED_BUILTIN 48
-
 // Board Hardware 
 #ifdef ARDUINO_ESP32S3_DEV
+  #define LED_RED     46
+  #define LED_BLUE    45
+  #define LED_GREEN   47
+  #define LED_BUILTIN 48
   #define IN          21
   #define OUT         38
   #define REED_IN     18
 #else //todo: find nano esp32 identifier
   //LED's are defined by framework
-  #define IN          33
-  #define OUT         5
-  #define REED_IN     34
+  #define IN          10
+  #define OUT         11
+  #define REED_IN     9
 #endif 
 
 #define BUTTON_STATE_ARRAY_LENGTH 31
