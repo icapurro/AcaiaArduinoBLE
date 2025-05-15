@@ -2,10 +2,9 @@
 #include <WebServer.h>
 #include <Update.h>
 
-#define WIFI_SSID "shotStopperAP"
-#define WIFI_PASS ""
-
+bool prevOtaModeRequested = false;
 bool otaMode = false;
+bool wifiConnecting = false;
 
 WebServer server(80);
 
@@ -59,7 +58,7 @@ const char success_html[] PROGMEM = R"rawliteral(
 void setupOTA() {
     // Serve a simple webpage for OTA update
     server.on("/", HTTP_GET, []() {
-        server.send(200, "text/html", index_html);
+        server.send_P(200, "text/html", index_html);
     });
 
     server.on("/status", HTTP_GET, []() {
@@ -68,7 +67,7 @@ void setupOTA() {
 
     // Define the OTA update route
     server.on("/update", HTTP_POST, []() {
-        server.send(200, "text/html", success_html);
+        server.send_P(200, "text/html", success_html);
         delay(5000);  // Give client time to receive response
         ESP.restart();
     }, []() {
@@ -104,12 +103,15 @@ void connectToWifi(String wifiSsid, String wifiPass) {
         if (wifiSsid == "") {
             Serial.println("No WiFi SSID provided");
             return;
-        } 
-        Serial.print("Connecting to WiFi: ");
-        Serial.println(wifiSsid);
-        WiFi.begin(wifiSsid, wifiPass);
-        delay(1000);
-        if (WiFi.status() == WL_CONNECTED) {
+        }
+        if (!wifiConnecting) {
+            Serial.print("Connecting to WiFi: ");
+            Serial.println(wifiSsid);
+            WiFi.begin(wifiSsid, wifiPass);
+            wifiConnecting = true;
+        }
+        if (wifiConnecting && WiFi.status() == WL_CONNECTED) {
+            wifiConnecting = false;
             // print LAN IP address
             Serial.println("Connected to WiFi");
             Serial.println(WiFi.localIP());
@@ -132,8 +134,9 @@ String getWifiIp() {
 }
 
 void disconnectFromWifi() {
+    wifiConnecting = false;
+    WiFi.disconnect(true);
     if (otaMode) {
-        WiFi.disconnect(true);
         server.stop();
         Serial.println("AP Mode Stopped");
         otaMode = false;
@@ -141,9 +144,19 @@ void disconnectFromWifi() {
 }
 
 bool checkOTAMode(bool otaModeRequested, String wifiSsid, String wifiPass) {
+    // when going from request to not requested, disconnect from wifi. 
+    // This way even if the server is not started, the wifi will be disconnected.
+    if (prevOtaModeRequested != otaModeRequested) {
+        prevOtaModeRequested = otaModeRequested;
+        if (!otaModeRequested) {
+            disconnectFromWifi();
+        }
+    }
     if (otaModeRequested && !otaMode) {
+        // when going from not requested to requested, connect to wifi. 
         connectToWifi(wifiSsid, wifiPass);
     } else if (!otaModeRequested && otaMode) {
+        // when going from requested to not requested, disconnect from wifi.
         disconnectFromWifi();
     }
     server.handleClient();
