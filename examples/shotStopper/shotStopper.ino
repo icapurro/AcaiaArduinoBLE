@@ -23,6 +23,7 @@
 
 #include <AcaiaArduinoBLE.h>
 #include <EEPROM.h>
+#include "ota_setup.h"
 
 #define FIRMWARE_VERSION 1
 #define MAX_OFFSET 5                // In case an error in brewing occured
@@ -78,6 +79,7 @@ uint8_t maxShotDurationS = 50;      // Primarily useful for latching switches, s
                                     // looses control of the paddle once the system
                                     // latches.
 uint8_t dripDelayS = 3;             // Time after the shot ended to measure the final weight
+bool otaModeRequested = false;      // Set to true if OTA mode is being requested.
 
 typedef enum {BUTTON, WEIGHT, TIME, UNDEF} ENDTYPE;
 
@@ -132,6 +134,7 @@ BLEByteCharacteristic maxShotDurationSCharacteristic("0xFF16",  BLEWrite | BLERe
 BLEByteCharacteristic dripDelaySCharacteristic("0xFF17",  BLEWrite | BLERead);
 BLEByteCharacteristic firmwareVersionCharacteristic("0xFF18",  BLERead);
 BLEByteCharacteristic scaleStatusCharacteristic("0xFF19",  BLERead | BLENotify);
+BLEByteCharacteristic otaModeRequestedCharacteristic("0xFF20",  BLEWrite | BLERead);
 
 enum ScaleStatus {
   STATUS_DISCONNECTED = 0,
@@ -193,6 +196,7 @@ void initializeBLE() {
   shotStopperService.addCharacteristic(dripDelaySCharacteristic);
   shotStopperService.addCharacteristic(firmwareVersionCharacteristic);
   shotStopperService.addCharacteristic(scaleStatusCharacteristic);
+  shotStopperService.addCharacteristic(otaModeRequestedCharacteristic);
   BLE.addService(shotStopperService);
   weightCharacteristic.writeValue(goalWeight);
   momentaryCharacteristic.writeValue(momentary ? 1 : 0);
@@ -203,6 +207,7 @@ void initializeBLE() {
   dripDelaySCharacteristic.writeValue(dripDelayS);
   firmwareVersionCharacteristic.writeValue(FIRMWARE_VERSION);
   scaleStatusCharacteristic.writeValue(STATUS_DISCONNECTED);
+  otaModeRequestedCharacteristic.writeValue(otaModeRequested ? 1 : 0);
   BLE.advertise();
   Serial.println("Bluetooth® device active, waiting for connections...");
   BLE.setEventHandler(BLEDisconnected, blePeripheralDisconnectHandler);
@@ -256,6 +261,11 @@ void pollAndReadBLE() {
     EEPROM.write(DRIP_DELAY_S_ADDR, dripDelayS);
     updated = true;
   }
+  if (otaModeRequestedCharacteristic.written()) {
+    otaModeRequested = otaModeRequestedCharacteristic.value() != 0;
+    Serial.print("OTA mode requested: ");
+    Serial.println(otaModeRequested);
+  }
   if (updated) {
     EEPROM.commit();
   }
@@ -286,6 +296,10 @@ void setup() {
 void loop() {
   // Check for setpoint updates
   pollAndReadBLE();
+
+  if (checkOTAMode(otaModeRequested)) {
+    return;
+  }
 
   // Connect to scale
   if (!scale.isConnected()) {
