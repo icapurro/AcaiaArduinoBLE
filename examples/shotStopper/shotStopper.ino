@@ -99,7 +99,7 @@ bool enabled = true;                // The shotStopper status, if disabled it wo
 String wifiSsid = "";
 String wifiPass = "";
 
-typedef enum {BUTTON, WEIGHT, TIME, UNDEF} ENDTYPE;
+typedef enum {BUTTON, WEIGHT, TIME, DISCONNECT, UNDEF} ENDTYPE;
 
 // RGB Colors {Red,Green,Blue}
 int RED[3] = {255, 0, 0};
@@ -431,6 +431,8 @@ void loop() {
     scale.init(); 
     currentWeight = 0;
     if(shot.brewing){
+      shot.brewing = false;
+      shot.end = ENDTYPE::DISCONNECT;
       setBrewingState(false);
     }
     if(scale.isConnected()){
@@ -610,17 +612,20 @@ void setBrewingState(bool brewing){
     Serial.print("ShotEnded by ");
     switch (shot.end) {
       case ENDTYPE::TIME:
-      Serial.println("time");
-      break;
-    case ENDTYPE::WEIGHT:
-    Serial.println("weight");
-      break;
-    case ENDTYPE::BUTTON:
-    Serial.println("button");
-      break;
-    case ENDTYPE::UNDEF:
-      Serial.println("undef");
-      break;
+        Serial.println("time");
+        break;
+      case ENDTYPE::WEIGHT:
+        Serial.println("weight");
+        break;
+      case ENDTYPE::BUTTON:
+        Serial.println("button");
+        break;
+      case ENDTYPE::DISCONNECT:
+        Serial.println("disconnect");
+        break;
+      case ENDTYPE::UNDEF:
+        Serial.println("undef");
+        break;
     }
 
     shot.end_s = seconds_f() - shot.start_timestamp_s;
