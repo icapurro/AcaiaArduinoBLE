@@ -46,11 +46,12 @@
 
 #define DEBUG false
 
-#define N 10                        // Number of datapoints used to calculate trend line
+#define N 10                   // Number of datapoints used to calculate trend line
 
 
-// Reduce CPU clock to lower V3 power draw (~130mA→100mA)
-#define LOW_VOLTAGE false
+#define LOW_VOLTAGE false      // Reduce CPU clock to lower V3 power draw (~130mA→100mA)
+
+#define TIMER_ONLY false      // disables brew by weight functionality, and only automates the timer/tare
 
 // Board Hardware 
 #ifdef ARDUINO_ESP32S3_DEV
@@ -461,7 +462,7 @@ void loop() {
     }
 
     // update shot trajectory
-    if(shot.brewing){
+    if(shot.brewing && !TIMER_ONLY){
       shot.time_s[shot.datapoints] = seconds_f()-shot.start_timestamp_s;
       shot.weight[shot.datapoints] = currentWeight;
       shot.shotTimer = shot.time_s[shot.datapoints];
@@ -516,7 +517,8 @@ void loop() {
   }
     
   // button held. Take over for the rest of the shot.
-  else if(!momentary 
+  else if(!TIMER_ONLY
+  && !momentary 
   && shot.brewing 
   && !buttonLatched 
   && (shot.shotTimer > minShotDurationS) 
@@ -545,7 +547,7 @@ void loop() {
   }
 
   //Max duration reached
-  else if(shot.brewing && shot.shotTimer > maxShotDurationS ){
+  else if(!TIMER_ONLY && shot.brewing && shot.shotTimer > maxShotDurationS ){
     shot.brewing = false;
     Serial.println("Max brew duration reached");
     shot.end = ENDTYPE::TIME;
@@ -558,7 +560,8 @@ void loop() {
   }
 
   //End shot
-  if(shot.brewing 
+  if(!TIMER_ONLY 
+  && shot.brewing 
   && shot.shotTimer >= shot.expected_end_s
   && shot.shotTimer >  minShotDurationS
   ){
@@ -569,7 +572,8 @@ void loop() {
   }
 
   //Detect error of shot
-  if(shot.start_timestamp_s
+  if(!TIMER_ONLY
+  && shot.start_timestamp_s
   && shot.end_s
   && currentWeight >= (goalWeight - weightOffset)
   && seconds_f() > shot.start_timestamp_s + shot.end_s + dripDelayS){
@@ -630,13 +634,13 @@ void setBrewingState(bool brewing){
 
     shot.end_s = seconds_f() - shot.start_timestamp_s;
     scale.stopTimer();
-    if(momentary &&
+    if(!TIMER_ONLY && momentary &&
       (ENDTYPE::WEIGHT == shot.end || ENDTYPE::TIME == shot.end)){
       //Pulse button to stop brewing
       digitalWrite(OUT,HIGH);Serial.println("wrote high");
       delay(300);
       digitalWrite(OUT,LOW);Serial.println("wrote low");
-    }else if(!momentary){
+    }else if(!TIMER_ONLY && !momentary){
       buttonLatched = false;
       buttonPressed = false;
       Serial.println("Button Unlatched and not pressed");
