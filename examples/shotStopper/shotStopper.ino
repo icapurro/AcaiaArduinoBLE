@@ -501,16 +501,21 @@ void loop() {
       //Serial.print(buttonArr[i]);
     }
     //Serial.println();
-    if(reedSwitch && !shot.brewing && seconds_f() < (shot.start_timestamp_s + shot.end_s + 0.5)){
+    //The reed switch measurements require a small amount of delay for accuracy.
+    //  if the shot just stopped, assume that the reed switch should read "open" for the first 0.5s
+    if(reedSwitch && !shot.brewing && seconds_f() < (shot.start_timestamp_s + shot.end_s + 1)){
+      //Serial.println("force reedSwitch Off");
       newButtonState = 0;
     }
   }
+
+  // SHOT INITIATION EVENTS --------------------------------
   
-  //button just pressed
+  //button just pressed (and released)
   if(newButtonState && buttonPressed == false ){
     Serial.println("ButtonPressed");
     buttonPressed = true;
-    if(!momentary){
+    if(!momentary || reedSwitch){
       shot.brewing = true;
       setBrewingState(shot.brewing);
     }
@@ -531,6 +536,8 @@ void loop() {
       scale.tare();
     }
   }
+
+  // SHOT COMPLETION EVENTS --------------------------------
 
   //button released
   else if(!buttonLatched 
@@ -570,6 +577,8 @@ void loop() {
     shot.end = ENDTYPE::WEIGHT;
     setBrewingState(shot.brewing); 
   }
+
+  // SHOT ANALYSIS  --------------------------------
 
   //Detect error of shot
   if(!TIMER_ONLY
@@ -640,6 +649,7 @@ void setBrewingState(bool brewing){
       digitalWrite(OUT,HIGH);Serial.println("wrote high");
       delay(300);
       digitalWrite(OUT,LOW);Serial.println("wrote low");
+      buttonPressed = false;
     }else if(!TIMER_ONLY && !momentary){
       buttonLatched = false;
       buttonPressed = false;
