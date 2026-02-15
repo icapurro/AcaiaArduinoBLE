@@ -18,6 +18,20 @@ if not defined BOOTLOADER_FILE (
 echo Found bootloader file: %BOOTLOADER_FILE%
 echo.
 
+rem --- Auto-detect partition table file ---
+for %%F in (shotStopper_partitions_*.bin) do (
+    set PARTITIONS_FILE=%%F
+)
+if not defined PARTITIONS_FILE (
+    echo ERROR: No partition table file found matching shotStopper_partitions_*.bin
+    pause
+    exit /b 1
+)
+
+echo Found partition table: %PARTITIONS_FILE%
+echo.
+
+
 rem --- List all app files ---
 set COUNT=0
 for %%F in (shotStopper_app_*.bin) do (
@@ -132,7 +146,11 @@ if %FLASH_BOOTLOADER%==1 (
 echo.
 if %FLASH_BOOTLOADER%==1 (
     echo Flashing bootloader + app...
-    python -m esptool write-flash 0x0 "%BOOTLOADER_FILE%" 0x10000 "%APP_FILE%"
+    python -m esptool write-flash ^
+    0x0 "%BOOTLOADER_FILE%" ^
+    0x8000 "%PARTITIONS_FILE%" ^
+    0x10000 "%APP_FILE%"
+
 ) else (
     echo Flashing app only...
     python -m esptool write-flash 0x10000 "%APP_FILE%"
