@@ -31,7 +31,6 @@ if not defined PARTITIONS_FILE (
 echo Found partition table: %PARTITIONS_FILE%
 echo.
 
-
 rem --- List all app files ---
 set COUNT=0
 for %%F in (shotStopper_app_*.bin) do (
@@ -80,6 +79,11 @@ echo.
 echo Selected app file: %APP_FILE%
 echo.
 
+:FLASH_LOOP
+echo ============================================
+echo   READY TO FLASH BOARD
+echo ============================================
+echo.
 echo Make sure the board is in DOWNLOAD MODE:
 echo   1) Hold BOOT
 echo   2) Plug in USB
@@ -88,93 +92,34 @@ echo.
 pause
 
 echo.
-echo Reading first 0x6000 bytes (bootloader region)...
-python -m esptool read-flash 0x0 0x6000 device_bootloader.bin
+echo Erasing flash...
+python -m esptool erase-flash
 if %errorlevel% neq 0 (
-    echo ERROR: Could not read flash from device.
+    echo ERROR: erase-flash failed.
     pause
-    exit /b %errorlevel%
+    goto FLASH_LOOP
 )
 
 echo.
-echo Extracting first 0x6000 bytes from known-good bootloader...
-copy /b "%BOOTLOADER_FILE%" bootloader_trim.bin >nul
-powershell -command "(Get-Content 'bootloader_trim.bin' -Encoding Byte)[0..24575] | Set-Content 'bootloader_trim.bin' -Encoding Byte"
-
-echo.
-echo Computing hashes...
-
-certutil -hashfile device_bootloader.bin SHA256 > device_hash.txt
-certutil -hashfile bootloader_trim.bin SHA256 > good_hash.txt
-
-set "device_hash="
-for /f "skip=1 tokens=1" %%A in (device_hash.txt) do (
-    if not defined device_hash set device_hash=%%A
-)
-
-set "good_hash="
-for /f "skip=1 tokens=1" %%A in (good_hash.txt) do (
-    if not defined good_hash set good_hash=%%A
-)
-
-echo Device hash: !device_hash!
-echo Good hash:   !good_hash!
-echo.
-
-if "!device_hash!"=="!good_hash!" (
-    echo Bootloader matches known-good version.
-    echo Will flash APP ONLY.
-    set FLASH_BOOTLOADER=0
-) else (
-    echo Bootloader does NOT match known-good version.
-    echo Will ERASE FLASH and flash BOOTLOADER + APP.
-    set FLASH_BOOTLOADER=1
-)
-
-echo.
-
-if %FLASH_BOOTLOADER%==1 (
-    echo Erasing flash...
-    python -m esptool erase-flash
-    if %errorlevel% neq 0 (
-        echo ERROR: erase-flash failed.
-        pause
-        exit /b %errorlevel%
-    )
-)
-
-echo.
-if %FLASH_BOOTLOADER%==1 (
-    echo Flashing bootloader + app...
-    python -m esptool write-flash ^
+echo Flashing bootloader + partitions + app...
+python -m esptool write-flash ^
     0x0 "%BOOTLOADER_FILE%" ^
     0x8000 "%PARTITIONS_FILE%" ^
     0x10000 "%APP_FILE%"
-
-) else (
-    echo Flashing app only...
-    python -m esptool write-flash 0x10000 "%APP_FILE%"
-)
-
 if %errorlevel% neq 0 (
     echo ERROR: write-flash failed.
     pause
-    exit /b %errorlevel%
+    goto FLASH_LOOP
 )
-
-echo.
-echo Cleaning up temporary files...
-del device_bootloader.bin >nul 2>&1
-del device_hash.txt >nul 2>&1
-del good_hash.txt >nul 2>&1
-del bootloader_trim.bin >nul 2>&1
 
 echo.
 echo ============================================
 echo   Flashing complete!
-echo   Temporary files removed.
-echo   Now UNPLUG and REPLUG the board
-echo   (do NOT hold BOOT)
+echo   Unplug this board.
+echo   Plug in the next board to flash again,
+echo   or close this window to stop.
 echo ============================================
 echo.
 pause
+
+goto FLASH_LOOP
