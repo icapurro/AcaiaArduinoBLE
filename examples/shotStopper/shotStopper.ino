@@ -86,6 +86,7 @@ uint8_t maxShotDurationS = 50;      // Primarily useful for latching switches, s
                                     // looses control of the paddle once the system
                                     // latches.
 uint8_t dripDelayS = 3;             // Time after the shot ended to measure the final weight
+bool otaModeRequested = false;      // Set to true if OTA mode is being requested.
 
 bool otaModeRequested = false;      // Set to true if OTA mode is being requested.
 
@@ -413,6 +414,10 @@ void loop() {
       updateScaleStatus(STATUS_DISCONNECTED);
       setColor(RED);
     }
+    return;
+  }
+
+  if (checkOTAMode(otaModeRequested)) {
     return;
   }
 
