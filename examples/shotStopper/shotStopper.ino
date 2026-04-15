@@ -49,11 +49,12 @@
 
 #define DEBUG false
 
-#define N 10                        // Number of datapoints used to calculate trend line
+#define N 10                   // Number of datapoints used to calculate trend line
 
 
-// Reduce CPU clock to lower V3 power draw (~130mA→100mA)
-#define LOW_VOLTAGE false
+#define LOW_VOLTAGE false      // Reduce CPU clock to lower V3 power draw (~130mA→100mA)
+
+#define TIMER_ONLY false      // disables brew by weight functionality, and only automates the timer/tare
 
 // Board Hardware 
 #ifdef ARDUINO_ESP32S3_DEV
@@ -106,7 +107,7 @@ bool tareStartTimer = false;        // Scale is able to tare and reset + start t
 bool beep = false;                  // Scale is able to beep without relying on a tare command (Bookoo support only)
 uint8_t beepLevel = 0;              // Scale beep level between 0 (silent) and 5 (loudest) (Bookoo support only)
 
-typedef enum {BUTTON, WEIGHT, TIME, UNDEF} ENDTYPE;
+typedef enum {BUTTON, WEIGHT, TIME, DISCONNECT, UNDEF} ENDTYPE;
 
 // RGB Colors {Red,Green,Blue}
 int RED[3] = {255, 0, 0};
@@ -467,6 +468,8 @@ void loop() {
     scale.init(); 
     currentWeight = 0;
     if(shot.brewing){
+      shot.brewing = false;
+      shot.end = ENDTYPE::DISCONNECT;
       setBrewingState(false);
     }
     if(scale.isConnected()){
@@ -495,7 +498,7 @@ void loop() {
     }
 
     // update shot trajectory
-    if(shot.brewing){
+    if(shot.brewing && !TIMER_ONLY){
       shot.time_s[shot.datapoints] = seconds_f()-shot.start_timestamp_s;
       shot.weight[shot.datapoints] = currentWeight;
       shot.shotTimer = shot.time_s[shot.datapoints];
@@ -534,23 +537,29 @@ void loop() {
       //Serial.print(buttonArr[i]);
     }
     //Serial.println();
-    if(reedSwitch && !shot.brewing && seconds_f() < (shot.start_timestamp_s + shot.end_s + 0.5)){
+    //The reed switch measurements require a small amount of delay for accuracy.
+    //  if the shot just stopped, assume that the reed switch should read "open" for the first 0.5s
+    if(reedSwitch && !shot.brewing && seconds_f() < (shot.start_timestamp_s + shot.end_s + 1)){
+      //Serial.println("force reedSwitch Off");
       newButtonState = 0;
     }
   }
+
+  // SHOT INITIATION EVENTS --------------------------------
   
-  //button just pressed
+  //button just pressed (and released)
   if(newButtonState && buttonPressed == false ){
     Serial.println("ButtonPressed");
     buttonPressed = true;
-    if(!momentary){
+    if(!momentary || reedSwitch){
       shot.brewing = true;
       setBrewingState(shot.brewing);
     }
   }
     
   // button held. Take over for the rest of the shot.
-  else if(!momentary 
+  else if(!TIMER_ONLY
+  && !momentary 
   && shot.brewing 
   && !buttonLatched 
   && (shot.shotTimer > minShotDurationS) 
@@ -572,6 +581,8 @@ void loop() {
     }
   }
 
+  // SHOT COMPLETION EVENTS --------------------------------
+
   //button released
   else if(!buttonLatched 
   && !newButtonState 
@@ -587,7 +598,7 @@ void loop() {
   }
 
   //Max duration reached
-  else if(shot.brewing && shot.shotTimer > maxShotDurationS ){
+  else if(!TIMER_ONLY && shot.brewing && shot.shotTimer > maxShotDurationS ){
     shot.brewing = false;
     Serial.println("Max brew duration reached");
     shot.end = ENDTYPE::TIME;
@@ -600,7 +611,8 @@ void loop() {
   }
 
   //End shot
-  if(shot.brewing 
+  if(!TIMER_ONLY 
+  && shot.brewing 
   && shot.shotTimer >= shot.expected_end_s
   && shot.shotTimer >  minShotDurationS
   ){
@@ -610,8 +622,11 @@ void loop() {
     setBrewingState(shot.brewing); 
   }
 
+  // SHOT ANALYSIS  --------------------------------
+
   //Detect error of shot
-  if(shot.start_timestamp_s
+  if(!TIMER_ONLY
+  && shot.start_timestamp_s
   && shot.end_s
   && currentWeight >= (goalWeight - weightOffset)
   && seconds_f() > shot.start_timestamp_s + shot.end_s + dripDelayS){
@@ -668,28 +683,32 @@ void setBrewingState(bool brewing){
     Serial.print("ShotEnded by ");
     switch (shot.end) {
       case ENDTYPE::TIME:
-      Serial.println("time");
-      break;
-    case ENDTYPE::WEIGHT:
-    Serial.println("weight");
-      break;
-    case ENDTYPE::BUTTON:
-    Serial.println("button");
-      break;
-    case ENDTYPE::UNDEF:
-      Serial.println("undef");
-      break;
+        Serial.println("time");
+        break;
+      case ENDTYPE::WEIGHT:
+        Serial.println("weight");
+        break;
+      case ENDTYPE::BUTTON:
+        Serial.println("button");
+        break;
+      case ENDTYPE::DISCONNECT:
+        Serial.println("disconnect");
+        break;
+      case ENDTYPE::UNDEF:
+        Serial.println("undef");
+        break;
     }
 
     shot.end_s = seconds_f() - shot.start_timestamp_s;
     scale.stopTimer();
-    if(momentary &&
+    if(!TIMER_ONLY && momentary &&
       (ENDTYPE::WEIGHT == shot.end || ENDTYPE::TIME == shot.end)){
       //Pulse button to stop brewing
       digitalWrite(OUT,HIGH);Serial.println("wrote high");
       delay(300);
       digitalWrite(OUT,LOW);Serial.println("wrote low");
-    }else if(!momentary){
+      buttonPressed = false;
+    }else if(!TIMER_ONLY && !momentary){
       buttonLatched = false;
       buttonPressed = false;
       Serial.println("Button Unlatched and not pressed");
@@ -723,7 +742,8 @@ void calculateEndTime(Shot* s){
     b = meanY-m*meanX;
 
     //Calculate time at which goal weight will be reached (x = (y-b)/m)
-    s->expected_end_s = (goalWeight - weightOffset - b)/m; 
+    // if M is negative (which can happen during a blooming shot when the flow stops) assume max duration (issue #29)
+    s->expected_end_s = (m < 0) ? maxShotDurationS : (goalWeight - weightOffset - b)/m;
   }
 }
 

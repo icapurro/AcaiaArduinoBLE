@@ -11,7 +11,8 @@ This is an Arduino Library which can be found in the Arduino IDE Library Manager
 | Acaia  | Pearl S | USB-Micro                  | v1.0.056 | Ok    | Yes | Yes | Yes
 | Acaia  | Pearl S | USB-C                      | ----     | Ok    | Yes | Yes  | Yes
 | Acaia  | Pyxis   | ----                       | v1.0.022 | Good  | Not Recommended (too sensitive) | Yes | Yes
-| Bookoo | Themis  | ----                       | v1.0.5   | Great | Yes | Yes | Yes 
+| Bookoo | Themis  Mini | ----                       | v1.0.5   | Great | Yes | Yes | Yes 
+| Bookoo | Themis Ultra  | ----                 | ----   | Great | Yes | Yes | Yes 
 
 
 ## Requirements
@@ -22,27 +23,31 @@ As of version V2.0.0, non-volatile storage for the setpoint and offset is only a
 ## Printed Circuit Board
 ![shotStopperV3 screenshot](https://github.com/user-attachments/assets/a09fe8fb-3705-44c0-88a2-07c61d67b8f6)
 
-The included "shotStopper" example code uses the ShotStopper PCB to make it simple to control your espresso machine using the scale. Files are hosted on [altium 365](https://365.altium.com/files/A15F83F1-2418-4843-B2E7-787275773560).
+The included "shotStopper" example code uses the ShotStopper PCB to make it simple to control your espresso machine using the scale.
 
 A kit can also be ordered by visiting [tatemazer.com](https://tatemazer.com/store)
+
+If you choose to build your own from scratch, v2.0 is recommended as it requires only through-hole components
 
 Join the discord for updates and support: https://discord.gg/NMXb5VYtre
 
 [![Video showing developmnent of the shotStopper](https://img.youtube.com/vi/434hrQDGtxo/0.jpg)](https://youtu.be/434hrQDGtxo)
 
-## Espresso Machine Compatibility*
+## Espresso Machine Compatibility
 
 | Model | Powered by Machine (5V) | Brew State Detection Method | Officially Documented |
 | ----- | ----------------------- | --------------------------- | ---------------- |
-| GS3 | No, requires included power supply | Brew Button | Yes |
+| GS3 | No, requires included power supply | Solenoid Valve (Reed Switch) | Yes |
 | Linea Micra | Yes | Brew Switch | Yes | 
-| Linea Mini | Older, non-IoT machines may require a power supply | Brew Switch | Yes |
+| Linea Mini* | Older, non-IoT machines may require a power supply | Brew Switch | Yes |
+| Linea Mini R | Yes | Brew Switch | Yes |
 | Silvia Pro (X) | Yes | Brew Button | Yes |
 | Stone Espresso | Yes | Solenoid Valve (Reed Switch) | Yes |
 | Ascaso Steel Duo PID | Untested | Brew Button | No
+| Profitec Move | Yes | Brew Button | No |
 
-*Ace Dotshot cannot be combined with the shotStopper at this time. Fortunately, shot duration is automated at the scale with the shotStopper, making the dotShot redundant.
- 
+*Ace Dotshot is compatible with the shotStopper. Also note, shot duration is automated at the scale with the shotStopper, making the dotShot redundant.
+
 ## ShotStopper Example Code Configuration
 
 The following variables at the top of the shotStopper.ino file can be configured by the user:
@@ -57,6 +62,9 @@ The following variables at the top of the shotStopper.ino file can be configured
 `AUTOTARE`
 * true by default. The scale will automatically tare when the shot is started, and, if MOMENTARY is false, will perform another tare at 3 seconds to notify the user that the switch is latched and should be returned to the home position.
 * if set to false, the shotStopper will never send a tare command. It is the user's responsibility to tare before each shot. This may be helpful if the scale is not stable when the shot begins, and thus the scale is unable to tare reliably.
+
+`TIMER_ONLY`
+* false by default. disables brew-by-weight functionality and enables only automatic timer and tare
 
 ## Demo
 
@@ -168,5 +176,8 @@ This is largely a basic port of the  [LunarGateway](https://github.com/frowin/Lu
 In addition to some minor notes from [pyacaia](https://github.com/lucapinello/pyacaia) library written for raspberryPI.
 
 Felicita Arc support contributions from baettigp
+
 Bookoo contributions from philgood
+
 lunar 2019 contributions from jniebuhr
+
