@@ -61,6 +61,13 @@
   #define IN          21
   #define OUT         38
   #define REED_IN     18
+#elifdef ARDUINO_ESP32C3_DEV
+  #define LED_RED     21
+  #define LED_BLUE    10
+  #define LED_GREEN   20
+  #define IN          8
+  #define OUT         6
+  #define REED_IN     7
 #else //todo: find nano esp32 identifier
   //LED's are defined by framework
   #define IN          10
@@ -86,8 +93,6 @@ uint8_t maxShotDurationS = 50;      // Primarily useful for latching switches, s
                                     // looses control of the paddle once the system
                                     // latches.
 uint8_t dripDelayS = 3;             // Time after the shot ended to measure the final weight
-bool otaModeRequested = false;      // Set to true if OTA mode is being requested.
-
 bool otaModeRequested = false;      // Set to true if OTA mode is being requested.
 
 bool enabled = true;                // The shotStopper status, if disabled it won't connect to 
@@ -417,7 +422,7 @@ void loop() {
     return;
   }
 
-  if (checkOTAMode(otaModeRequested)) {
+  if (checkOTAMode(otaModeRequested, wifiSsid, wifiPass)) {
     return;
   }
 
