@@ -29,7 +29,7 @@
 #define MAX_OFFSET 5                // In case an error in brewing occured
 #define BUTTON_READ_PERIOD_MS 5
 
-#define EEPROM_SIZE 75
+#define EEPROM_SIZE 78
 #define SIGNATURE_ADDR 0 // Use the first byte to store a magic number/signature to know if the memory has been initialized
 #define ENABLED_ADDR 1
 #define WEIGHT_ADDR 2 // Use the second byte of EEPROM to store the goal weight
@@ -42,6 +42,9 @@
 #define DRIP_DELAY_S_ADDR 9
 #define WIFI_SSID_ADDR 10
 #define WIFI_PASS_ADDR 42
+#define TARE_START_TIMER_ADDR 74
+#define BEEP_ADDR 75
+#define BEEP_LEVEL_ADDR 76
 #define SIGNATURE_VALUE 0xAA
 
 #define DEBUG false
@@ -99,6 +102,10 @@ bool enabled = true;                // The shotStopper status, if disabled it wo
                                     // the scale nor it will take over the brew.
 String wifiSsid = "";
 String wifiPass = "";
+
+bool tareStartTimer = false;        // Scale is able to tare and reset + start timer in one command (Bookoo support only)
+bool beep = false;                  // Scale is able to beep without relying on a tare command (Bookoo support only)
+uint8_t beepLevel = 0;              // Scale beep level between 0 (silent) and 5 (loudest) (Bookoo support only)
 
 typedef enum {BUTTON, WEIGHT, TIME, DISCONNECT, UNDEF} ENDTYPE;
 
@@ -159,7 +166,9 @@ BLEByteCharacteristic otaModeRequestedCharacteristic("0xFF21",  BLEWrite | BLERe
 BLECharacteristic wifiSsidCharacteristic("0xFF22",  BLEWrite | BLERead, 32);
 BLECharacteristic wifiPassCharacteristic("0xFF23",  BLEWrite, 32);
 BLECharacteristic wifiIpCharacteristic("0xFF24",  BLERead | BLENotify, 16);
-
+BLEByteCharacteristic tareStartTimerCharacteristic("0xFF25",  BLEWrite | BLERead);
+BLEByteCharacteristic beepCharacteristic("0xFF26",  BLEWrite | BLERead);
+BLEByteCharacteristic beepLevelCharacteristic("0xFF27",  BLEWrite | BLERead);
 
 enum ScaleStatus {
   STATUS_DISCONNECTED = 0,
@@ -239,6 +248,9 @@ void loadOrInitEEPROM() {
     EEPROM.write(DRIP_DELAY_S_ADDR, dripDelayS);
     writeStringToEEPROM(WIFI_SSID_ADDR, wifiSsid);
     writeStringToEEPROM(WIFI_PASS_ADDR, wifiPass);
+    EEPROM.write(TARE_START_TIMER_ADDR, tareStartTimer);
+    EEPROM.write(BEEP_ADDR, beep);
+    EEPROM.write(BEEP_LEVEL_ADDR, beepLevel);
     EEPROM.commit();
     Serial.println("EEPROM initialized with defaults");
   } else {
@@ -258,6 +270,9 @@ void loadOrInitEEPROM() {
     dripDelayS = EEPROM.read(DRIP_DELAY_S_ADDR);
     wifiSsid = readStringFromEEPROM(WIFI_SSID_ADDR, 32);
     wifiPass = readStringFromEEPROM(WIFI_PASS_ADDR, 32);
+    tareStartTimer = EEPROM.read(TARE_START_TIMER_ADDR);
+    beep = EEPROM.read(BEEP_ADDR);
+    beepLevel = EEPROM.read(BEEP_LEVEL_ADDR);
   }
 }
 
@@ -281,6 +296,9 @@ void initializeBLE() {
   shotStopperService.addCharacteristic(wifiSsidCharacteristic);
   shotStopperService.addCharacteristic(wifiPassCharacteristic);
   shotStopperService.addCharacteristic(wifiIpCharacteristic);
+  shotStopperService.addCharacteristic(tareStartTimerCharacteristic);
+  shotStopperService.addCharacteristic(beepCharacteristic);
+  shotStopperService.addCharacteristic(beepLevelCharacteristic);
   BLE.addService(shotStopperService);
   enabledCharacteristic.writeValue(enabled ? 1 : 0);
   weightCharacteristic.writeValue(goalWeight);
@@ -296,6 +314,9 @@ void initializeBLE() {
   otaModeRequestedCharacteristic.writeValue(otaModeRequested ? 1 : 0);
   writeStringToCharacteristic(wifiSsidCharacteristic, wifiSsid);
   writeStringToCharacteristic(wifiIpCharacteristic, lastWifiIp);
+  tareStartTimerCharacteristic.writeValue(tareStartTimer ? 1 : 0);
+  beepCharacteristic.writeValue(beep ? 1 : 0);
+  beepLevelCharacteristic.writeValue(beepLevel);
   BLE.advertise();
   Serial.println("Bluetooth® device active, waiting for connections...");
   BLE.setEventHandler(BLEDisconnected, blePeripheralDisconnectHandler);
@@ -371,6 +392,21 @@ void pollAndReadBLE() {
     int passLength = wifiPassCharacteristic.valueLength();
     wifiPass = String((const char*)passData, passLength);
     writeStringToEEPROM(WIFI_PASS_ADDR, wifiPass);
+    updated = true;
+  }
+  if (tareStartTimerCharacteristic.written()) {
+    tareStartTimer = tareStartTimerCharacteristic.value() != 0;
+    EEPROM.write(TARE_START_TIMER_ADDR, tareStartTimer ? 1 : 0);
+    updated = true;
+  }
+  if (beepCharacteristic.written()) {
+    beep = beepCharacteristic.value() != 0;
+    EEPROM.write(BEEP_ADDR, beep ? 1 : 0);
+    updated = true;
+  }
+  if (beepLevelCharacteristic.written()) {
+    beepLevel = beepLevelCharacteristic.value();
+    EEPROM.write(BEEP_LEVEL_ADDR, beepLevel);
     updated = true;
   }
   if (updated) {
@@ -532,7 +568,15 @@ void loop() {
     Serial.println("Button Latched");
     digitalWrite(OUT,HIGH); Serial.println("wrote high");
     // Get the scale to beep to inform user.
-    if(autoTare){
+    if (beep) {
+      // 3 rapid beeps
+      scale.beep(beepLevel);
+      delay(100);
+      scale.beep(beepLevel);
+      delay(100);
+      scale.beep(beepLevel);
+    }
+    else if(autoTare){
       scale.tare();
     }
   }
@@ -606,6 +650,14 @@ void loop() {
       EEPROM.commit();
     }
     Serial.println();
+
+    // Inform user final weight detection is done and scale can be operated safely
+    if (beep) {
+      // Two long beeps
+      scale.beep(beepLevel);
+      delay(250);
+      scale.beep(beepLevel);
+    }
   }
 }
 
@@ -615,11 +667,17 @@ void setBrewingState(bool brewing){
     shot.start_timestamp_s = seconds_f();
     shot.shotTimer = 0;
     shot.datapoints = 0;
-    scale.resetTimer();
-    scale.startTimer();
-    if(autoTare){
-      scale.tare();
+
+    if (tareStartTimer) {
+      scale.tareStartTimer();
+    } else {
+      scale.resetTimer();
+      scale.startTimer();
+      if(autoTare){
+        scale.tare();
+      }
     }
+    
     Serial.println("Weight Timer End");
   }else{
     Serial.print("ShotEnded by ");

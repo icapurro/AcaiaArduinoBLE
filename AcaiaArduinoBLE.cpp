@@ -21,6 +21,15 @@ byte TARE_GENERIC[6]            = { 0x03, 0x0a, 0x01, 0x00, 0x00, 0x08 };
 byte START_TIMER_GENERIC[6]     = { 0x03, 0x0a, 0x04, 0x00, 0x00, 0x0a };
 byte STOP_TIMER_GENERIC[6]      = { 0x03, 0x0a, 0x05, 0x00, 0x00, 0x0d };
 byte RESET_TIMER_GENERIC[6]     = { 0x03, 0x0a, 0x06, 0x00, 0x00, 0x0c };
+byte TARE_START_TIMER_BOOKOO[6]     = { 0x03, 0x0a, 0x07, 0x00, 0x00, 0x00 };
+const byte BEEP_LEVEL_BOOKOO[6][6] = {
+  {0x03, 0x0A, 0x02, 0x00, 0x00, 0x0B},
+  {0x03, 0x0A, 0x02, 0x00, 0x01, 0x0A},
+  {0x03, 0x0A, 0x02, 0x00, 0x02, 0x09},
+  {0x03, 0x0A, 0x02, 0x00, 0x03, 0x08},
+  {0x03, 0x0A, 0x02, 0x00, 0x04, 0x0F},
+  {0x03, 0x0A, 0x02, 0x00, 0x05, 0x0E}
+};
 
 /* Generic commands from
    https://github.com/graphefruit/Beanconqueror/blob/master/src/classes/devices/felicita/constants.ts
@@ -198,6 +207,33 @@ bool AcaiaArduinoBLE::resetTimer(){
     }else{
         _connected = false;
         Serial.println("reset timer write failed");
+        return false;
+    }
+}
+
+bool AcaiaArduinoBLE::tareStartTimer(){
+    if(_write.writeValue(TARE_START_TIMER_BOOKOO, 6)){
+          Serial.println("tare and start timer write successful");
+          return true;
+    }else{
+        _connected = false;
+        Serial.println("tare and start timer write failed");
+        return false;
+    }
+}
+
+bool AcaiaArduinoBLE::beep(int level){
+    if (level < 0 || level > 5) {
+        Serial.println("beep level should be between 0 and 5");
+        return false;
+    }
+
+    if(_write.writeValue(BEEP_LEVEL_BOOKOO[level], 6)){
+          Serial.println("beep level write successful");
+          return true;
+    }else{
+        _connected = false;
+        Serial.println("beep level write failed");
         return false;
     }
 }
