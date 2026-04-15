@@ -685,7 +685,7 @@ void calculateEndTime(Shot* s){
 
     //Calculate time at which goal weight will be reached (x = (y-b)/m)
     // if M is negative (which can happen during a blooming shot when the flow stops) assume max duration (issue #29)
-    s->expected_end_s = (m < 0) ? MAX_SHOT_DURATION_S : (goalWeight - weightOffset - b)/m;
+    s->expected_end_s = (m < 0) ? maxShotDurationS : (goalWeight - weightOffset - b)/m;
   }
 }
 
