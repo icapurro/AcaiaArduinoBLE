@@ -5,7 +5,8 @@
   tare's the scale when the "in" gpio is triggered (active low),
   and then triggers the "out" gpio to stop the shot once ( goalWeight - weightOffset ) is achieved.
 
-  Tested on a Acaia Pyxis, Arduino nano ESP32, and La Marzocco GS3. 
+  Tested on a Acaia Pyxis, Arduino Nano ESP32, ESP32-WROOM-DA, and La Marzocco GS3.
+  On ESP32-WROOM-DA, do not use GPIO 2 or 25 for brew I/O (antenna switch lines).
 
   Note that only the EEPROM library only supports ESP32-based controllers.
 
@@ -23,6 +24,7 @@
 
 #include "AcaiaArduinoBLE.h"
 #include <EEPROM.h>
+#include <math.h>
 #include "OTASetup.h"
 
 #define FIRMWARE_VERSION 2
@@ -52,7 +54,7 @@
 // Reduce CPU clock to lower V3 power draw (~130mA→100mA)
 #define LOW_VOLTAGE false
 
-// Board Hardware 
+// Board Hardware
 #ifdef ARDUINO_ESP32S3_DEV
   #define LED_RED     46
   #define LED_BLUE    45
@@ -61,14 +63,20 @@
   #define IN          21
   #define OUT         38
   #define REED_IN     18
+#elif defined(ARDUINO_ESP32_WROOM_DA)
+  // GPIO 2 and 25 drive the RF antenna switch; using them for brew I/O breaks BLE/WiFi
+  #define IN          26
+  #define OUT         4
+  #define REED_IN     9
 #else //todo: find nano esp32 identifier
   //LED's are defined by framework
   #define IN          10
   #define OUT         11
   #define REED_IN     9
-#endif 
+#endif
 
 #define BUTTON_STATE_ARRAY_LENGTH 31
+#define SHOT_ARRAY_CAPACITY 1000
 
 // configuration variables
 bool reedSwitch = false;            // Set to true if the brew state is being determined 
@@ -126,8 +134,8 @@ struct Shot {
   float shotTimer;         // Reset when the final drip measurement is made
   float end_s;             // Number of seconds after the shot started
   float expected_end_s;    // Estimated duration of the shot
-  float weight[1000];      // A scatter plot of the weight measurements, along with time_s[]
-  float time_s[1000];      // Number of seconds after the shot starte
+  float weight[SHOT_ARRAY_CAPACITY];      // A scatter plot of the weight measurements, along with time_s[]
+  float time_s[SHOT_ARRAY_CAPACITY];      // Number of seconds after the shot starte
   int datapoints;          // Number of datapoitns in the scatter plot
   bool brewing;            // True when actively brewing, otherwise false
   ENDTYPE end;
@@ -163,6 +171,8 @@ enum ScaleStatus {
 uint8_t lastScaleStatus = 255; // Invalid initial value to force first update
 static uint8_t lastShotStatusValue = 0xFF; // Initialize with a value that is unlikely to be a valid status
 String lastWifiIp = "empty";
+bool bleReady = false;
+unsigned long lastBleInitAttemptMs = 0;
 
 void updateScaleStatus(uint8_t newScaleStatus) {
   if (newScaleStatus != lastScaleStatus) {
@@ -188,10 +198,18 @@ void updateBLEWifiIp() {
 }
 
 void writeStringToEEPROM(int startAddress, const String &str) {
-    for (int i = 0; i < str.length(); i++) {
+    int maxWritable = EEPROM_SIZE - startAddress - 1; // Keep room for null terminator
+    if (maxWritable < 0) {
+        return;
+    }
+    int length = str.length();
+    if (length > maxWritable) {
+        length = maxWritable;
+    }
+    for (int i = 0; i < length; i++) {
         EEPROM.write(startAddress + i, str[i]);
     }
-    EEPROM.write(startAddress + str.length(), '\0'); // Null-terminate the string
+    EEPROM.write(startAddress + length, '\0'); // Null-terminate the string
 }
 
 String readStringFromEEPROM(int startAddress, int maxLength) {
@@ -256,7 +274,14 @@ void loadOrInitEEPROM() {
 }
 
 void initializeBLE() {
-  BLE.begin();
+  // Do not call BLE.end() after a failed BLE.begin(); it can trip heap assertions on ESP32
+  if (!BLE.begin()) {
+    Serial.println("BLE begin failed");
+    bleReady = false;
+    return;
+  }
+  bleReady = true;
+
   BLE.setLocalName("shotStopper");
   BLE.setDeviceName("shotStopper");
   BLE.setAdvertisedService(shotStopperService);
@@ -300,6 +325,9 @@ void blePeripheralDisconnectHandler(BLEDevice central) {
 }
 
 void pollAndReadBLE() {
+  if (!bleReady) {
+    return;
+  }
   bool updated = false;
   BLE.poll();
   if (enabledCharacteristic.written()) {
@@ -373,7 +401,7 @@ void pollAndReadBLE() {
 }
 
 void setup() {
-#ifdef LOW_VOLTAGE
+#if LOW_VOLTAGE
   setCpuFrequencyMhz(80);
 #endif
   Serial.begin(9600);
@@ -382,12 +410,15 @@ void setup() {
   loadOrInitEEPROM();
 
   // initialize the GPIO hardware
-  pinMode(LED_BUILTIN, OUTPUT);
   pinMode(in, INPUT_PULLUP);
   pinMode(OUT, OUTPUT);
+  digitalWrite(OUT, LOW);
+#ifdef LED_RED // ESP32-WROOM-DA has no onboard RGB LED
+  pinMode(LED_BUILTIN, OUTPUT);
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
   pinMode(LED_BLUE, OUTPUT);
+#endif
   setColor(OFF);
 
   // initialize the BLE hardware
@@ -397,6 +428,13 @@ void setup() {
 
 
 void loop() {
+  // Retry BLE startup if it failed in setup
+  if (!bleReady && millis() - lastBleInitAttemptMs > 3000) {
+    lastBleInitAttemptMs = millis();
+    Serial.println("Retrying BLE init...");
+    initializeBLE();
+  }
+
   // Check for setpoint updates
   pollAndReadBLE();
   updateBLEShotStatus(shot.brewing);
@@ -417,6 +455,11 @@ void loop() {
   }
 
   // Connect to scale
+  if (!bleReady) {
+    setColor(RED);
+    return;
+  }
+
   if (!scale.isConnected()) {
     updateScaleStatus(STATUS_DISCONNECTED);
     setColor(RED);
@@ -452,10 +495,15 @@ void loop() {
 
     // update shot trajectory
     if(shot.brewing){
-      shot.time_s[shot.datapoints] = seconds_f()-shot.start_timestamp_s;
-      shot.weight[shot.datapoints] = currentWeight;
-      shot.shotTimer = shot.time_s[shot.datapoints];
-      shot.datapoints++;
+      if (shot.datapoints < SHOT_ARRAY_CAPACITY) {
+        shot.time_s[shot.datapoints] = seconds_f()-shot.start_timestamp_s;
+        shot.weight[shot.datapoints] = currentWeight;
+        shot.shotTimer = shot.time_s[shot.datapoints];
+        shot.datapoints++;
+      } else {
+        // Prevent buffer overflow if brewing somehow runs longer than expected.
+        shot.shotTimer = seconds_f()-shot.start_timestamp_s;
+      }
 
       Serial.print(" ");
       Serial.print(shot.shotTimer);
@@ -637,7 +685,7 @@ void setBrewingState(bool brewing){
 void calculateEndTime(Shot* s){
   
   // Do not  predict end time if there aren't enough espresso measurements yet
-  if( (s->datapoints < N) || (s->weight[s->datapoints-1] < 10) ){
+  if ((s->datapoints < N) || (s->weight[s->datapoints-1] < 10)) {
     s->expected_end_s = maxShotDurationS;
   }
   else{
@@ -651,13 +699,27 @@ void calculateEndTime(Shot* s){
       sumSquaredX += ( s->time_s[i] * s->time_s[i] );
     }
 
-    m = (N*sumXY-sumX*sumY) / (N*sumSquaredX-(sumX*sumX));
+    float denominator = (N * sumSquaredX - (sumX * sumX));
+    if (fabs(denominator) < 1e-6f) {
+      s->expected_end_s = maxShotDurationS;
+      return;
+    }
+
+    m = (N * sumXY - (sumX * sumY)) / denominator;
+    if (fabs(m) < 1e-6f) {
+      s->expected_end_s = maxShotDurationS;
+      return;
+    }
+
     meanX = sumX/N;
     meanY = sumY/N;
     b = meanY-m*meanX;
 
     //Calculate time at which goal weight will be reached (x = (y-b)/m)
-    s->expected_end_s = (goalWeight - weightOffset - b)/m; 
+    s->expected_end_s = (goalWeight - weightOffset - b)/m;
+    if (!isfinite(s->expected_end_s) || s->expected_end_s < 0) {
+      s->expected_end_s = maxShotDurationS;
+    }
   }
 }
 
@@ -666,9 +728,11 @@ float seconds_f(){
 }
 
 void setColor(int rgb[3]){
+#ifdef LED_RED
   analogWrite(LED_RED,   255-rgb[0] );
   analogWrite(LED_GREEN, 255-rgb[1] );
   analogWrite(LED_BLUE,  255-rgb[2] );
+#endif
   currentColor[0] = rgb[0];
   currentColor[1] = rgb[1];
   currentColor[2] = rgb[2];
