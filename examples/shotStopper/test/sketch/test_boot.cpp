@@ -48,7 +48,9 @@ TEST(boot_loads_stored_config) {
   CHECK(momentary);
   CHECK_EQ(maxShotDurationS, (uint8_t)45);
   CHECK(wifiSsid == "HomeWifi");
-  CHECK_EQ(fake::eepromCommitCount(), 0);  // nothing rewritten
+  // Stored by the old 75-byte firmware: the only write is adding the grinder fields.
+  CHECK(fake::serialContains("EEPROM migrated: grinder fields added"));
+  CHECK_EQ(fake::eepromCommitCount(), 1);
 }
 
 TEST(boot_publishes_config_service) {

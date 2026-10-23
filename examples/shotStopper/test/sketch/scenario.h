@@ -17,6 +17,9 @@
 #include <Arduino.h>
 #include <EEPROM.h>
 
+#include <HTTPClient.h>
+
+#include "fake_grinder.h"
 #include "fake_phone.h"
 #include "fake_scale.h"
 #include "sketch_api.h"
@@ -25,12 +28,22 @@
 // Run the sketch's setup().
 inline void boot() { setup(); }
 
-// One loop() iteration. The sketch's loop() normally advances the clock itself
-// (delay(1) in checkOTAMode, BLE scans); if it didn't, move time on 1 ms so
-// runFor/runUntil always finish.
+// One loop() iteration, then one iteration of the grinder client's task.
+// On the device they run concurrently on two cores; here they interleave in a
+// fixed order on one clock. Requests are tagged with who sent them, so tests
+// can check that loop() never talks to the grinder.
+// loop() normally advances the clock itself (delay(1) in checkOTAMode, BLE
+// scans); if it didn't, move time on 1 ms so runFor/runUntil always finish.
 inline void step() {
   unsigned long before = millis();
-  loop();
+  {
+    fakehttp::ScopedContext context("loop");
+    loop();
+  }
+  {
+    fakehttp::ScopedContext context("grinder");
+    grinder.runOnce();
+  }
   if (millis() == before) fake::advance(1);
 }
 
@@ -110,6 +123,7 @@ struct StoredConfig {
 };
 
 inline void preloadConfig(const StoredConfig& c) {
+  fake::eepromPreload(sketch::kGrinderSignatureAddr, 0xFF);  // as the old 75-byte firmware left it
   fake::eepromPreload(sketch::kSignatureAddr, static_cast<uint8_t>(sketch::kSignatureValue));
   fake::eepromPreload(sketch::kEnabledAddr, c.enabled);
   fake::eepromPreload(sketch::kWeightAddr, c.goalWeight);
@@ -162,10 +176,48 @@ class Espresso {
   unsigned long stoppedMs_ = 0;
 };
 
+// Stores WiFi credentials and a grinder (IP + pairingId) as an earlier boot
+// would have, and makes WiFi connect as soon as it is started.
+inline void preloadGrinder(const FakeGrinder& g, const char* ssid = "HomeWifi", const char* pass = "secret") {
+  StoredConfig config;
+  config.wifiSsid = ssid;
+  config.wifiPass = pass;
+  preloadConfig(config);
+  fake::eepromPreload(sketch::kGrinderSignatureAddr, static_cast<uint8_t>(sketch::kGrinderSignatureValue));
+  fake::eepromPreloadString(sketch::kGrinderIpAddr, g.ip().c_str());
+  for (int i = 0; i < 4; i++)
+    fake::eepromPreload(sketch::kGrinderPairingIdAddr + i, static_cast<uint8_t>(g.pairingId() >> (8 * i)));
+  fake::setWifiConnectsOnBegin(true);
+}
+
 // Boots the sketch with `scale` in range and runs until it is connected.
 inline void bootConnected(FakeScale& scale) {
   fakeble::addPeripheral(&scale);
   boot();
   REQUIRE(runUntil([&] { return scale.connected() && scale.isSubscribed(); }, 15000));
   runFor(200);
+}
+
+// Boots with a configured grinder and `scale` in range; runs until the scale
+// is connected and the grinder link is ready.
+inline void bootWithGrinder(FakeScale& scale, FakeGrinder& g) {
+  preloadGrinder(g);
+  bootConnected(scale);
+  REQUIRE(runUntil([] { return grinder.status() == GRINDER_READY; }, 10000));
+}
+
+// Simulate core 1 running loop() while the grinder task (core 0) waits on a
+// request: each grinder request lets loop() run for `ms` of simulated time
+// before it is answered (0 = one loop() iteration). Only loop() runs meanwhile,
+// as on the device, where the grinder task is the one that is blocked.
+inline void runLoopDuringRequests(FakeGrinder& g, unsigned long ms = 0) {
+  g.onRequest = [ms](const std::string&) {
+    fakehttp::ScopedContext context("loop");
+    unsigned long end = millis() + ms;
+    do {
+      unsigned long before = millis();
+      loop();
+      if (millis() == before) fake::advance(1);
+    } while (millis() < end);
+  };
 }

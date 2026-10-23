@@ -32,4 +32,8 @@ const int kWifiSsidAddr = WIFI_SSID_ADDR;
 const int kWifiPassAddr = WIFI_PASS_ADDR;
 const int kMaxOffset = MAX_OFFSET;
 const int kFirmwareVersion = FIRMWARE_VERSION;
+const int kGrinderSignatureAddr = GRINDER_SIGNATURE_ADDR;
+const int kGrinderSignatureValue = GRINDER_SIGNATURE_VALUE;
+const int kGrinderIpAddr = GRINDER_IP_ADDR;
+const int kGrinderPairingIdAddr = GRINDER_PAIRING_ID_ADDR;
 }  // namespace sketch

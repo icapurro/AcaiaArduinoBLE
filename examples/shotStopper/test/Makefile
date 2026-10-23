@@ -12,9 +12,11 @@ SANITIZE   ?= 1
 
 # Production code (the sketch and its library copy) is compiled with -Wall only;
 # harness code also gets -Wextra.
-BASE_FLAGS    := -std=c++17 -g -O0 -MMD -MP -Ifakes -Isupport -Iframework -Isketch
+BASE_FLAGS    := -std=c++17 -g -O0 -MMD -MP -Ifakes -Isupport -Iframework -Isketch -Ivendor
 HARNESS_FLAGS := $(BASE_FLAGS) -Wall -Wextra
-PROD_FLAGS    := $(BASE_FLAGS) -Wall
+# Production code builds as C++11, like the ESP32 Arduino 2.x core (gnu++11), so
+# C++14/17-only code in the sketch fails here before it fails in the IDE.
+PROD_FLAGS    := $(filter-out -std=c++17,$(BASE_FLAGS)) -std=gnu++11 -Wall
 # Host-only noise from unmodified sketch code: size_t is 64-bit here (OTASetup's
 # printf("%d", size_t)), and clang flags the VLA GCC accepts on the ESP32.
 PROD_FLAGS    += -Wno-format -Wno-vla-cxx-extension
@@ -27,12 +29,14 @@ ifeq ($(SANITIZE),1)
   LDFLAGS       += $(SAN_FLAGS)
 endif
 
-HARNESS_SRCS := fakes/Arduino.cpp fakes/EEPROM.cpp fakes/ArduinoBLE.cpp fakes/network_stubs.cpp \
-                support/fake_scale.cpp support/fake_phone.cpp framework/test_main.cpp
+HARNESS_SRCS := fakes/Arduino.cpp fakes/EEPROM.cpp fakes/ArduinoBLE.cpp fakes/network_stubs.cpp fakes/freertos_fake.cpp fakes/HTTPClient.cpp \
+                support/fake_scale.cpp support/fake_phone.cpp support/fake_grinder.cpp framework/test_main.cpp
 HARNESS_OBJS := $(HARNESS_SRCS:%.cpp=$(OBJ)/%.o)
 
-# The sketch's own copy of the scale library, as the Arduino IDE builds it.
+# The sketch's own copy of the scale library and the grinder client, as the
+# Arduino IDE builds them.
 LIBRARY_OBJ := $(OBJ)/prod/AcaiaArduinoBLE.o
+GRINDER_OBJ := $(OBJ)/prod/GrinderClient.o
 
 LIBRARY_TEST_OBJS := $(patsubst %.cpp,$(OBJ)/%.o,$(wildcard library/test_*.cpp))
 SKETCH_TEST_OBJS  := $(patsubst %.cpp,$(OBJ)/%.o,$(wildcard sketch/test_*.cpp)) $(OBJ)/prod/sketch_tu.o
@@ -51,10 +55,10 @@ test: build
 	./$(BUILD)/sketch_tests || rc=1; \
 	exit $$rc
 
-$(BUILD)/library_tests: $(LIBRARY_TEST_OBJS) $(LIBRARY_OBJ) $(HARNESS_OBJS)
+$(BUILD)/library_tests: $(LIBRARY_TEST_OBJS) $(LIBRARY_OBJ) $(GRINDER_OBJ) $(HARNESS_OBJS)
 	$(CXX) $(LDFLAGS) $^ -o $@
 
-$(BUILD)/sketch_tests: $(SKETCH_TEST_OBJS) $(LIBRARY_OBJ) $(HARNESS_OBJS)
+$(BUILD)/sketch_tests: $(SKETCH_TEST_OBJS) $(LIBRARY_OBJ) $(GRINDER_OBJ) $(HARNESS_OBJS)
 	$(CXX) $(LDFLAGS) $^ -o $@
 
 $(OBJ)/%.o: %.cpp
@@ -62,6 +66,10 @@ $(OBJ)/%.o: %.cpp
 	$(CXX) $(HARNESS_FLAGS) -c $< -o $@
 
 $(LIBRARY_OBJ): $(SKETCH_DIR)/AcaiaArduinoBLE.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(PROD_FLAGS) -c $< -o $@
+
+$(GRINDER_OBJ): $(SKETCH_DIR)/GrinderClient.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(PROD_FLAGS) -c $< -o $@
 

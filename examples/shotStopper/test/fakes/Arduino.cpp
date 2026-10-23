@@ -131,6 +131,14 @@ void digitalWrite(uint8_t pin, uint8_t value) {
 
 void analogWrite(uint8_t pin, int value) { pins()[pin].analog = value; }
 
+uint32_t esp_random() {
+  static uint32_t state = 0x2545F491u;
+  state ^= state << 13;
+  state ^= state >> 17;
+  state ^= state << 5;
+  return state;
+}
+
 bool setCpuFrequencyMhz(uint32_t mhz) {
   g_cpuMhz = mhz;
   return true;

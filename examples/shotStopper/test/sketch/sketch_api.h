@@ -6,6 +6,8 @@
 
 #include <Arduino.h>
 
+#include "../../GrinderClient.h"
+
 void setup();
 void loop();
 
@@ -25,6 +27,9 @@ extern uint8_t dripDelayS;
 extern int in;
 extern String wifiSsid;
 extern String wifiPass;
+extern String grinderIp;
+extern uint32_t grinderPairingId;
+extern GrinderClient grinder;
 
 // Sketch #defines.
 namespace sketch {
@@ -47,4 +52,8 @@ extern const int kWifiSsidAddr;
 extern const int kWifiPassAddr;
 extern const int kMaxOffset;
 extern const int kFirmwareVersion;
+extern const int kGrinderSignatureAddr;
+extern const int kGrinderSignatureValue;
+extern const int kGrinderIpAddr;
+extern const int kGrinderPairingIdAddr;
 }  // namespace sketch

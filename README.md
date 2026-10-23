@@ -58,6 +58,38 @@ The following variables at the top of the shotStopper.ino file can be configured
 * true by default. The scale will automatically tare when the shot is started, and, if MOMENTARY is false, will perform another tare at 3 seconds to notify the user that the switch is latched and should be returned to the home position.
 * if set to false, the shotStopper will never send a tare command. It is the user's responsibility to tare before each shot. This may be helpful if the scale is not stable when the shot begins, and thus the scale is unable to tare reliably.
 
+## Grind-by-Sync with a Mahlkönig E65/E80 GbS grinder
+
+The shotStopper can stand in for the espresso machine in the grinder's Grind-by-Sync loop. It reports each shot's brew time and final weight to the grinder over WiFi, so the grinder adjusts its grind setting. It uses the grinder's *Generic WiFi* API (HTTPS on port 30001).
+
+Setup:
+
+1. Pair the grinder outside the shotStopper, for example in the companion app. Note the grinder's IP address (give it a fixed address in your router) and the **Pairing ID** shown on the grinder.
+2. Set the WiFi network over BLE (`0xFF22` SSID, `0xFF23` password).
+3. Write the grinder IP address to `0xFF25` (e.g. `192.168.1.30`) and the Pairing ID to `0xFF26` (4 bytes, little-endian). Writing an empty IP turns grinder sync off.
+
+How shots are reported:
+
+* Each Grind-by-Sync grind creates a job, which the shotStopper takes right away. It keeps polling during a shot, so it can take the job again if the grinder lists it again (~50 s after it was last taken).
+* A shot stopped by weight is reported as a success, with its duration and the weight after the drip delay.
+* A flush (shorter than `minShotDurationS`) leaves the job for the real shot.
+* Any other ending (button, max duration) is reported as canceled, so the grinder doesn't learn from it.
+* A job no shot uses within 5 minutes is canceled.
+
+`0xFF27` (read/notify) shows the grinder link status:
+
+| Value | Meaning |
+| --- | --- |
+| 0 | not configured |
+| 1 | connecting to WiFi |
+| 2 | grinder unreachable |
+| 3 | pairing rejected (pair again, then update the Pairing ID) |
+| 4 | ready |
+| 5 | job taken (a grind is waiting for its shot) |
+| 6 | reporting a shot |
+
+OTA mode still pauses everything else, grinder sync included. Requires the ArduinoJson 7 library.
+
 ## Demo
 
 You can find a demo on Youtube:

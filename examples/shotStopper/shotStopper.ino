@@ -14,6 +14,14 @@
   to the "shotStopper" BLE device and read/write to the weight characteristic,
   otherwise the weight is defaulted to 36g.
 
+  Grind-by-Sync (optional): reports each shot to a paired Mahlkonig E65/E80 GbS
+  grinder over WiFi so it can adjust its grind. Pair the grinder elsewhere (e.g.
+  the companion app), then over BLE set the WiFi SSID/password (0xFF22/0xFF23),
+  the grinder IP (0xFF25) and the Pairing ID (0xFF26, 4 bytes little-endian).
+  0xFF27 notifies the link status. See GrinderClient.h and the README.
+
+  Requires the ArduinoJson library, version 7 (tested with 7.2.0).
+
   Created by Tate Mazer, 2023.
 
   Released under the MIT license.
@@ -26,12 +34,13 @@
 #include <EEPROM.h>
 #include <math.h>
 #include "OTASetup.h"
+#include "GrinderClient.h"
 
-#define FIRMWARE_VERSION 2
+#define FIRMWARE_VERSION 3
 #define MAX_OFFSET 5                // In case an error in brewing occured
 #define BUTTON_READ_PERIOD_MS 5
 
-#define EEPROM_SIZE 75
+#define EEPROM_SIZE 128
 #define SIGNATURE_ADDR 0 // Use the first byte to store a magic number/signature to know if the memory has been initialized
 #define ENABLED_ADDR 1
 #define WEIGHT_ADDR 2 // Use the second byte of EEPROM to store the goal weight
@@ -44,9 +53,15 @@
 #define DRIP_DELAY_S_ADDR 9
 #define WIFI_SSID_ADDR 10
 #define WIFI_PASS_ADDR 42
+#define GRINDER_SIGNATURE_ADDR 75 // Set once the grinder fields below exist (added after the first 75 bytes)
+#define GRINDER_IP_ADDR 76        // 16 bytes: dotted IPv4, null-terminated
+#define GRINDER_PAIRING_ID_ADDR 92 // 4 bytes, little-endian
 #define SIGNATURE_VALUE 0xAA
+#define GRINDER_SIGNATURE_VALUE 0xA5
 
 #define DEBUG false
+#define GRINDER_DEBUG true          // Log every grinder request/reply and shot outcome to Serial
+#define WEIGHT_DEBUG false          // Log every scale weight packet (and, while brewing, timer and predicted end)
 
 #define N 10                        // Number of datapoints used to calculate trend line
 
@@ -78,6 +93,7 @@
 #define BUTTON_STATE_ARRAY_LENGTH 31
 #define SHOT_ARRAY_CAPACITY 1000
 
+
 // configuration variables
 bool reedSwitch = false;            // Set to true if the brew state is being determined 
                                     // by a reed switch attached to the brew solenoid
@@ -101,6 +117,8 @@ bool enabled = true;                // The shotStopper status, if disabled it wo
                                     // the scale nor it will take over the brew.
 String wifiSsid = "";
 String wifiPass = "";
+String grinderIp = "";              // Mahlkonig GbS grinder for Grind-by-Sync; "" = off
+uint32_t grinderPairingId = 0;      // From pairing done outside the shotStopper
 
 typedef enum {BUTTON, WEIGHT, TIME, UNDEF} ENDTYPE;
 
@@ -161,6 +179,9 @@ BLEByteCharacteristic otaModeRequestedCharacteristic("0xFF21",  BLEWrite | BLERe
 BLECharacteristic wifiSsidCharacteristic("0xFF22",  BLEWrite | BLERead, 32);
 BLECharacteristic wifiPassCharacteristic("0xFF23",  BLEWrite, 32);
 BLECharacteristic wifiIpCharacteristic("0xFF24",  BLERead | BLENotify, 16);
+BLECharacteristic grinderIpCharacteristic("0xFF25",  BLEWrite | BLERead, 16);
+BLECharacteristic grinderPairingIdCharacteristic("0xFF26",  BLEWrite | BLERead, 4);
+BLEByteCharacteristic grinderStatusCharacteristic("0xFF27",  BLERead | BLENotify);
 
 
 enum ScaleStatus {
@@ -168,11 +189,30 @@ enum ScaleStatus {
   STATUS_CONNECTED = 1,
 };
 
+// ESP32 core 3.x frees the Bluetooth controller's memory before setup() unless
+// a BT library claims it (ArduinoBLE doesn't), and BLE.begin() then crashes in
+// esp_bt_controller_init. Claim it here. Core 2.x already returns true (and
+// defines it non-weak on the classic ESP32), so only override it on 3.x.
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+extern "C" bool btInUse() { return true; }
+#endif
+// (Kept below the type definitions: the Arduino IDE inserts its generated
+// prototypes, e.g. calculateEndTime(Shot*), right before the first function.)
+
 uint8_t lastScaleStatus = 255; // Invalid initial value to force first update
 static uint8_t lastShotStatusValue = 0xFF; // Initialize with a value that is unlikely to be a valid status
 String lastWifiIp = "empty";
 bool bleReady = false;
 unsigned long lastBleInitAttemptMs = 0;
+
+// Grind-by-Sync: the grinder client runs in its own task (see GrinderClient.h);
+// loop() only sends it events and publishes its status.
+GrinderClient grinder;
+uint8_t lastGrinderStatus = 0xFF;
+bool grinderActive = false;
+bool pendingGrinderSuccess = false;   // stopped by weight, waiting out the drip delay
+unsigned long pendingGrinderAtMs = 0;
+uint32_t pendingGrinderDurationMs = 0;
 
 void updateScaleStatus(uint8_t newScaleStatus) {
   if (newScaleStatus != lastScaleStatus) {
@@ -195,6 +235,47 @@ void updateBLEWifiIp() {
     writeStringToCharacteristic(wifiIpCharacteristic, wifiIp);
     lastWifiIp = wifiIp;
   }
+}
+
+void sendGrinderConfig() {
+  if (GRINDER_DEBUG) {
+    GrinderClient::log("loop", "grinder config: ip=\"%s\" pairingId=%lu ssid=\"%s\"", grinderIp.c_str(),
+                       (unsigned long)grinderPairingId, wifiSsid.c_str());
+  }
+  if (!grinder.configure(grinderIp.c_str(), grinderPairingId, wifiSsid.c_str(), wifiPass.c_str())) {
+    Serial.println("grinder: event queue full, config dropped");
+  }
+}
+
+void updateGrinderActive() {
+  bool active = enabled && !otaModeRequested;
+  if (active != grinderActive) {
+    grinderActive = active;
+    if (GRINDER_DEBUG) {
+      GrinderClient::log("loop", "grinder %s", active ? "active" : "inactive (disabled or OTA)");
+    }
+    grinder.setActive(active);
+    if (!active) {
+      pendingGrinderSuccess = false;
+    }
+  }
+}
+
+void updateBLEGrinderStatus() {
+  uint8_t status = grinder.status();
+  if (status != lastGrinderStatus) {
+    if (GRINDER_DEBUG) {
+      GrinderClient::log("loop", "grinder status %d -> %d (0xFF27)", lastGrinderStatus, status);
+    }
+    grinderStatusCharacteristic.writeValue(status);
+    lastGrinderStatus = status;
+  }
+}
+
+void writePairingIdToCharacteristic(uint32_t pairingId) {
+  uint8_t bytes[4] = {(uint8_t)(pairingId & 0xff), (uint8_t)((pairingId >> 8) & 0xff),
+                      (uint8_t)((pairingId >> 16) & 0xff), (uint8_t)((pairingId >> 24) & 0xff)};
+  grinderPairingIdCharacteristic.writeValue(bytes, 4);
 }
 
 void writeStringToEEPROM(int startAddress, const String &str) {
@@ -228,6 +309,20 @@ String readStringFromEEPROM(int startAddress, int maxLength) {
     return String(data);
 }
 
+void writePairingIdToEEPROM(uint32_t pairingId) {
+  for (int i = 0; i < 4; i++) {
+    EEPROM.write(GRINDER_PAIRING_ID_ADDR + i, (pairingId >> (8 * i)) & 0xff);
+  }
+}
+
+void writeGrinderDefaultsToEEPROM() {
+  grinderIp = "";
+  grinderPairingId = 0;
+  EEPROM.write(GRINDER_SIGNATURE_ADDR, GRINDER_SIGNATURE_VALUE);
+  writeStringToEEPROM(GRINDER_IP_ADDR, grinderIp);
+  writePairingIdToEEPROM(grinderPairingId);
+}
+
 void writeStringToCharacteristic(BLECharacteristic& characteristic, const String& str) {
     const char* data = str.c_str();
     int length = str.length();
@@ -251,6 +346,7 @@ void loadOrInitEEPROM() {
     EEPROM.write(DRIP_DELAY_S_ADDR, dripDelayS);
     writeStringToEEPROM(WIFI_SSID_ADDR, wifiSsid);
     writeStringToEEPROM(WIFI_PASS_ADDR, wifiPass);
+    writeGrinderDefaultsToEEPROM();
     EEPROM.commit();
     Serial.println("EEPROM initialized with defaults");
   } else {
@@ -270,6 +366,21 @@ void loadOrInitEEPROM() {
     dripDelayS = EEPROM.read(DRIP_DELAY_S_ADDR);
     wifiSsid = readStringFromEEPROM(WIFI_SSID_ADDR, 32);
     wifiPass = readStringFromEEPROM(WIFI_PASS_ADDR, 32);
+    if (EEPROM.read(GRINDER_SIGNATURE_ADDR) != GRINDER_SIGNATURE_VALUE) {
+      // Written by firmware without grinder support: add the grinder fields.
+      writeGrinderDefaultsToEEPROM();
+      EEPROM.commit();
+      Serial.println("EEPROM migrated: grinder fields added");
+    } else {
+      grinderIp = readStringFromEEPROM(GRINDER_IP_ADDR, 15);
+      if (!GrinderClient::isValidIPv4(grinderIp.c_str())) {
+        grinderIp = "";
+      }
+      grinderPairingId = (uint32_t)EEPROM.read(GRINDER_PAIRING_ID_ADDR)
+                       | ((uint32_t)EEPROM.read(GRINDER_PAIRING_ID_ADDR + 1) << 8)
+                       | ((uint32_t)EEPROM.read(GRINDER_PAIRING_ID_ADDR + 2) << 16)
+                       | ((uint32_t)EEPROM.read(GRINDER_PAIRING_ID_ADDR + 3) << 24);
+    }
   }
 }
 
@@ -300,6 +411,9 @@ void initializeBLE() {
   shotStopperService.addCharacteristic(wifiSsidCharacteristic);
   shotStopperService.addCharacteristic(wifiPassCharacteristic);
   shotStopperService.addCharacteristic(wifiIpCharacteristic);
+  shotStopperService.addCharacteristic(grinderIpCharacteristic);
+  shotStopperService.addCharacteristic(grinderPairingIdCharacteristic);
+  shotStopperService.addCharacteristic(grinderStatusCharacteristic);
   BLE.addService(shotStopperService);
   enabledCharacteristic.writeValue(enabled ? 1 : 0);
   weightCharacteristic.writeValue(goalWeight);
@@ -315,6 +429,10 @@ void initializeBLE() {
   otaModeRequestedCharacteristic.writeValue(otaModeRequested ? 1 : 0);
   writeStringToCharacteristic(wifiSsidCharacteristic, wifiSsid);
   writeStringToCharacteristic(wifiIpCharacteristic, lastWifiIp);
+  writeStringToCharacteristic(grinderIpCharacteristic, grinderIp);
+  writePairingIdToCharacteristic(grinderPairingId);
+  lastGrinderStatus = grinder.status();
+  grinderStatusCharacteristic.writeValue(lastGrinderStatus);
   BLE.advertise();
   Serial.println("Bluetooth® device active, waiting for connections...");
   BLE.setEventHandler(BLEDisconnected, blePeripheralDisconnectHandler);
@@ -381,12 +499,14 @@ void pollAndReadBLE() {
     Serial.print("OTA mode requested: ");
     Serial.println(otaModeRequested);
   }
+  bool grinderConfigChanged = false;
   if (wifiSsidCharacteristic.written()) {
     const uint8_t* ssidData = wifiSsidCharacteristic.value();
     int ssidLength = wifiSsidCharacteristic.valueLength();
     wifiSsid = String((const char*)ssidData, ssidLength);
     writeStringToEEPROM(WIFI_SSID_ADDR, wifiSsid);
     updated = true;
+    grinderConfigChanged = true;
   }
   if (wifiPassCharacteristic.written()) {
     const uint8_t* passData = wifiPassCharacteristic.value();
@@ -394,15 +514,51 @@ void pollAndReadBLE() {
     wifiPass = String((const char*)passData, passLength);
     writeStringToEEPROM(WIFI_PASS_ADDR, wifiPass);
     updated = true;
+    grinderConfigChanged = true;
+  }
+  if (grinderIpCharacteristic.written()) {
+    int length = grinderIpCharacteristic.valueLength();
+    const char* data = (const char*)grinderIpCharacteristic.value();
+    while (length > 0 && data[length - 1] == '\0') {
+      length--;  // some apps send a trailing null
+    }
+    String ip = String(data, length);
+    if (ip.length() == 0 || GrinderClient::isValidIPv4(ip.c_str())) {
+      grinderIp = ip;
+      writeStringToEEPROM(GRINDER_IP_ADDR, grinderIp);
+      updated = true;
+      grinderConfigChanged = true;
+    } else {
+      Serial.println("grinder: invalid IP address ignored");
+    }
+    writeStringToCharacteristic(grinderIpCharacteristic, grinderIp);
+  }
+  if (grinderPairingIdCharacteristic.written()) {
+    if (grinderPairingIdCharacteristic.valueLength() == 4) {
+      const uint8_t* b = grinderPairingIdCharacteristic.value();
+      grinderPairingId = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+      writePairingIdToEEPROM(grinderPairingId);
+      updated = true;
+      grinderConfigChanged = true;
+    } else {
+      Serial.println("grinder: pairingId must be 4 bytes");
+      writePairingIdToCharacteristic(grinderPairingId);
+    }
   }
   if (updated) {
     EEPROM.commit();
+  }
+  if (grinderConfigChanged) {
+    sendGrinderConfig();
   }
 }
 
 void setup() {
 #if LOW_VOLTAGE
   setCpuFrequencyMhz(80);
+#endif
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  Serial.setTxBufferSize(2048);  // long log lines overflowed the default 256-byte USB CDC buffer
 #endif
   Serial.begin(9600);
 
@@ -420,6 +576,14 @@ void setup() {
   pinMode(LED_BLUE, OUTPUT);
 #endif
   setColor(OFF);
+
+  // Start the grinder client on core 0, away from shot control
+  grinder.begin();
+  grinder.setDebug(GRINDER_DEBUG);
+  sendGrinderConfig();
+  updateGrinderActive();
+  xTaskCreatePinnedToCore(GrinderClient::taskMain, "grinder", GrinderClient::kTaskStackBytes, &grinder,
+                          GrinderClient::kTaskPriority, NULL, GrinderClient::kTaskCore);
 
   // initialize the BLE hardware
   initializeBLE();
@@ -439,6 +603,8 @@ void loop() {
   pollAndReadBLE();
   updateBLEShotStatus(shot.brewing);
   updateBLEWifiIp();
+  updateGrinderActive();  // before the inactive branch below ends a shot
+  updateBLEGrinderStatus();
   // If shotStopper is disabled or OTA mode is requested, stop the shot and disconnect from the scale
   if (!enabled || checkOTAMode(otaModeRequested, wifiSsid, wifiPass)) {
     if(shot.brewing){
@@ -452,6 +618,18 @@ void loop() {
       setColor(RED);
     }
     return;
+  }
+
+  // Report a shot stopped by weight once the drip delay has passed, with the final weight
+  if (pendingGrinderSuccess && millis() - pendingGrinderAtMs >= (unsigned long)dripDelayS * 1000UL) {
+    pendingGrinderSuccess = false;
+    float massMg = currentWeight * 1000.0f;
+    uint32_t mass = massMg <= 0 ? 0 : (massMg >= 5000000.0f ? 5000000 : (uint32_t)lroundf(massMg));
+    if (GRINDER_DEBUG) {
+      GrinderClient::log("loop", "shot result to grinder: Success, %lu ms, %lu mg (%.1f g after drip delay)",
+                         (unsigned long)pendingGrinderDurationMs, (unsigned long)mass, currentWeight);
+    }
+    grinder.shotFinished(ShotOutcome::Success, pendingGrinderDurationMs, mass);
   }
 
   // Connect to scale
@@ -487,7 +665,9 @@ void loop() {
   // otherwise getWeight() will return stale data
   if(scale.newWeightAvailable()){
     currentWeight = scale.getWeight();
-    Serial.print(currentWeight);
+    if (WEIGHT_DEBUG) {
+      Serial.print(currentWeight);
+    }
 
     if(!shot.brewing){
       setColor(GREEN);
@@ -505,15 +685,18 @@ void loop() {
         shot.shotTimer = seconds_f()-shot.start_timestamp_s;
       }
 
-      Serial.print(" ");
-      Serial.print(shot.shotTimer);
-
       //get the likely end time of the shot
       calculateEndTime(&shot);
-      Serial.print(" ");
-      Serial.print(shot.expected_end_s);
+      if (WEIGHT_DEBUG) {
+        Serial.print(" ");
+        Serial.print(shot.shotTimer);
+        Serial.print(" ");
+        Serial.print(shot.expected_end_s);
+      }
     }
-    Serial.println();
+    if (WEIGHT_DEBUG) {
+      Serial.println();
+    }
   }
 
   // Read button every period
@@ -637,6 +820,11 @@ void loop() {
 void setBrewingState(bool brewing){
   if(brewing){
     Serial.println("shot started");
+    pendingGrinderSuccess = false;
+    if (GRINDER_DEBUG) {
+      GrinderClient::log("loop", "shot started: grinder keeps the job taken until it's reported");
+    }
+    grinder.shotStarted();
     shot.start_timestamp_s = seconds_f();
     shot.shotTimer = 0;
     shot.datapoints = 0;
@@ -664,6 +852,28 @@ void setBrewingState(bool brewing){
     }
 
     shot.end_s = seconds_f() - shot.start_timestamp_s;
+    // Tell the grinder how the shot went. Only shots stopped by weight teach it;
+    // a flush (shorter than minShotDurationS) keeps the job for the real shot.
+    if (shot.end == ENDTYPE::WEIGHT) {
+      pendingGrinderSuccess = true;
+      pendingGrinderAtMs = millis();
+      pendingGrinderDurationMs = (uint32_t)lroundf(shot.end_s * 1000.0f);
+      if (GRINDER_DEBUG) {
+        GrinderClient::log("loop", "shot stopped by weight after %.2f s; reporting to grinder after %u s drip delay",
+                           shot.end_s, dripDelayS);
+      }
+    } else if (shot.end == ENDTYPE::BUTTON && shot.end_s < minShotDurationS) {
+      if (GRINDER_DEBUG) {
+        GrinderClient::log("loop", "flush (%.2f s < %u s): grinder job kept for the real shot", shot.end_s,
+                           minShotDurationS);
+      }
+      grinder.shotFinished(ShotOutcome::Flush);
+    } else {
+      if (GRINDER_DEBUG) {
+        GrinderClient::log("loop", "shot ended after %.2f s, not by weight: grinder told Canceled", shot.end_s);
+      }
+      grinder.shotFinished(ShotOutcome::Canceled);
+    }
     scale.stopTimer();
     if(momentary &&
       (ENDTYPE::WEIGHT == shot.end || ENDTYPE::TIME == shot.end)){

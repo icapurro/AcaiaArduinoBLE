@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "freertos_fake.h"  // the ESP32 core's Arduino.h pulls in FreeRTOS too
+
 // The ESP32 core's abs() keeps the fractional part of floats; the C library
 // int abs() would silently truncate the sketch's offset-error check.
 using std::abs;
@@ -136,6 +138,7 @@ class Print {
 class HardwareSerial : public Print {
  public:
   void begin(unsigned long) {}
+  size_t setTxBufferSize(size_t size) { return size; }
   explicit operator bool() const { return true; }
   size_t write(const uint8_t* data, size_t size) override;
 };
@@ -165,6 +168,9 @@ int digitalRead(uint8_t pin);
 void digitalWrite(uint8_t pin, uint8_t value);
 void analogWrite(uint8_t pin, int value);
 bool setCpuFrequencyMhz(uint32_t mhz);
+
+// Hardware RNG on the ESP32; a fixed-seed xorshift here so runs repeat.
+uint32_t esp_random();
 
 // ---------------------------------------------------------------- test controls
 

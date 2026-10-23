@@ -283,3 +283,117 @@ TEST(fake_scale_encodes_each_protocol) {
   CHECK_EQ(generic[6], (uint8_t)'-');
   CHECK_EQ((generic[7] << 16) | (generic[8] << 8) | generic[9], 12345);
 }
+
+// ---------------------------------------------------------------- FreeRTOS / RNG / WiFi mode
+
+static void dummyTask(void*) {}
+
+TEST(task_creation_is_recorded_not_started) {
+  int param = 7;
+  TaskHandle_t handle = nullptr;
+  CHECK_EQ(xTaskCreatePinnedToCore(dummyTask, "grinder", 16384, &param, 1, &handle, 0), pdPASS);
+  CHECK(handle != nullptr);
+  REQUIRE(fake::tasks().size() == 1);
+  const auto& t = fake::tasks()[0];
+  CHECK_EQ(t.name, std::string("grinder"));
+  CHECK(t.function == dummyTask);
+  CHECK(t.parameters == &param);
+  CHECK_EQ(t.stackDepth, 16384u);
+  CHECK_EQ(t.priority, 1u);
+  CHECK_EQ(t.coreId, 0);
+}
+
+TEST(queue_is_fifo_and_rejects_when_full) {
+  struct Item { int a; char b[3]; };
+  QueueHandle_t q = xQueueCreate(2, sizeof(Item));
+  Item one{1, "x"}, two{2, "y"}, three{3, "z"}, out{};
+  CHECK_EQ(xQueueSend(q, &one, 0), pdTRUE);
+  CHECK_EQ(xQueueSend(q, &two, 0), pdTRUE);
+  CHECK_EQ(xQueueSend(q, &three, 0), errQUEUE_FULL);
+  CHECK_EQ(uxQueueMessagesWaiting(q), 2u);
+  CHECK_EQ(xQueueReceive(q, &out, 0), pdTRUE);
+  CHECK_EQ(out.a, 1);
+  CHECK_EQ(std::string(out.b), std::string("x"));
+  CHECK_EQ(xQueueReceive(q, &out, 0), pdTRUE);
+  CHECK_EQ(out.a, 2);
+  CHECK_EQ(xQueueReceive(q, &out, 0), pdFALSE);
+}
+
+TEST(vtaskdelay_advances_the_clock) {
+  vTaskDelay(pdMS_TO_TICKS(20));
+  CHECK_EQ(millis(), 20UL);
+}
+
+TEST(esp_random_repeats_across_runs) {
+  // Fixed seed: the same sequence in every (forked) test process.
+  CHECK_EQ(esp_random(), 0xe124b63au);
+  CHECK_EQ(esp_random(), 0x8b9a74abu);
+}
+
+TEST(wifi_mode_and_connect_on_begin) {
+  CHECK_EQ(fake::wifiMode(), WIFI_OFF);
+  WiFi.mode(WIFI_STA);
+  CHECK_EQ(fake::wifiMode(), WIFI_STA);
+  WiFi.begin(String("home"), String("pw"));
+  CHECK_EQ(WiFi.status(), WL_DISCONNECTED);
+  fake::setWifiConnectsOnBegin(true);
+  WiFi.begin(String("home"), String("pw"));  // still connecting: refused, like the ESP32
+  CHECK_EQ(fake::wifiBeginRejectedCount(), 1);
+  CHECK_EQ(WiFi.status(), WL_DISCONNECTED);
+  WiFi.disconnect();
+  WiFi.begin(String("home"), String("pw"));
+  CHECK_EQ(WiFi.status(), WL_CONNECTED);
+}
+
+// ---------------------------------------------------------------- HTTP
+
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+TEST(http_to_an_unregistered_host_is_refused_but_recorded) {
+  WiFiClientSecure tls;
+  HTTPClient http;
+  REQUIRE(http.begin(tls, String("https://10.0.0.9:30001/grinderApi/brewJobs")));
+  CHECK_EQ(http.POST(String("{}")), HTTPC_ERROR_CONNECTION_REFUSED);
+  REQUIRE(fakehttp::requests().size() == 1);
+  CHECK_EQ(fakehttp::requests()[0].host, std::string("10.0.0.9"));
+  CHECK_EQ(fakehttp::requests()[0].port, 30001);
+  CHECK_EQ(fakehttp::requests()[0].path, std::string("/grinderApi/brewJobs"));
+}
+
+namespace {
+struct EchoServer : fakehttp::Server {
+  fakehttp::Response handle(const fakehttp::Request& r) override { return {200, "echo:" + r.body}; }
+};
+}  // namespace
+
+TEST(http_requests_reach_a_registered_server_with_settings) {
+  EchoServer echo;
+  fakehttp::registerServer("192.168.1.30", 30001, &echo);
+  fake::advance(1234);
+  WiFiClientSecure tls;
+  tls.setInsecure();
+  HTTPClient http;
+  {
+    fakehttp::ScopedContext ctx("grinder");
+    REQUIRE(http.begin(tls, String("https://192.168.1.30:30001/x")));
+    http.setReuse(false);
+    http.setTimeout(8000);
+    http.setConnectTimeout(8000);
+    http.addHeader("Content-Type", "application/json");
+    CHECK_EQ(http.POST(String("{\"version\":1}")), 200);
+    CHECK(http.getString() == "echo:{\"version\":1}");
+    CHECK_EQ(http.getSize(), 18);
+    http.end();
+  }
+  CHECK_EQ(fakehttp::context(), std::string("test"));
+  const auto& r = fakehttp::requests().at(0);
+  CHECK_EQ(r.timeMs, 1234UL);
+  CHECK_EQ(r.context, std::string("grinder"));
+  CHECK_EQ(r.scheme, std::string("https"));
+  CHECK_EQ(r.headers.at("Content-Type"), std::string("application/json"));
+  CHECK(r.tlsInsecure);
+  CHECK(!r.reuse);
+  CHECK_EQ(r.timeoutMs, (uint16_t)8000);
+  CHECK_EQ(r.followRedirects, HTTPC_DISABLE_FOLLOW_REDIRECTS);
+}

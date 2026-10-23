@@ -1,7 +1,8 @@
 # shotStopper host tests
 
-Runs the real `shotStopper.ino` and its `AcaiaArduinoBLE` library on your
-computer, against fake Arduino, EEPROM and BLE layers. Nothing is flashed;
+Runs the real `shotStopper.ino`, its `AcaiaArduinoBLE` library and the
+`GrinderClient` on your computer, against fake Arduino, EEPROM, BLE, WiFi,
+HTTPS and FreeRTOS layers. Nothing is flashed;
 a full run takes a few seconds.
 
 The Arduino IDE only compiles a sketch's top-level files and `src/`, so this
@@ -10,6 +11,8 @@ folder never ends up in the firmware.
 ## Running
 
 Requirements: a C++17 compiler (clang or gcc) and `make`, on macOS or Linux.
+No network or package install: ArduinoJson is vendored in `vendor/` (see
+`vendor/VERSION.md`).
 
 ```sh
 make -C examples/shotStopper/test        # from the repo root
@@ -38,9 +41,13 @@ state start fresh every time, and a crash or hang fails only that test.
 
 ```
 framework/   test runner: TEST, CHECK, CHECK_EQ, CHECK_NEAR, REQUIRE
-fakes/       Arduino.h, EEPROM.h, ArduinoBLE.h, WiFi.h, WebServer.h, Update.h
-support/     FakeScale (a BLE scale) and FakePhone (a BLE config client)
-library/     tests for ../AcaiaArduinoBLE.cpp, plus self-tests for the fakes
+fakes/       Arduino.h, EEPROM.h, ArduinoBLE.h, WiFi.h, WiFiClientSecure.h,
+             HTTPClient.h, WebServer.h, Update.h, freertos/*.h
+support/     FakeScale (a BLE scale), FakePhone (a BLE config client),
+             FakeGrinder (a Mahlkönig GbS grinder's Generic WiFi API)
+vendor/      pinned third-party headers (ArduinoJson)
+library/     tests for ../AcaiaArduinoBLE.cpp and ../GrinderClient.cpp, plus
+             self-tests for the fakes
 sketch/      tests for ../shotStopper.ino
 build/       output (gitignored)
 ```
@@ -52,6 +59,9 @@ build/       output (gitignored)
   prototype there.
 - The build also compiles the sketch with `-DARDUINO_ESP32_WROOM_DA` (compile
   only), so the WROOM-DA pin branch stays buildable.
+- Production files (the sketch, `AcaiaArduinoBLE.cpp`, `GrinderClient.cpp`)
+  build as `gnu++11`, like the ESP32 Arduino 2.x core, so C++14/17-only code
+  fails here before it fails in the IDE. Harness code is C++17.
 
 ## Simulated time
 
@@ -62,6 +72,25 @@ build/       output (gitignored)
 - `BLE.available()` finds nothing new (10 ms per call, so the 10 s scale scan
   finishes);
 - a test calls `fake::advance(ms)`, `runFor(ms)` or `runUntil(cond, ms)`.
+
+## The grinder client's task
+
+On the device, `GrinderClient` runs in its own FreeRTOS task on core 0. Here
+`xTaskCreatePinnedToCore` only records the task, and the scenario helper
+`step()` runs one `loop()` iteration, then one `grinder.runOnce()`, on the same
+clock. Every HTTP request is tagged with who sent it (`"loop"` or `"grinder"`),
+so tests can check that `loop()` never talks to the grinder.
+
+Two consequences:
+
+- Requests take no simulated time unless a test says so.
+  `runLoopDuringRequests(grinder, ms)` makes each request "hang" for `ms` while
+  `loop()` keeps running, the way core 1 does while core 0 waits. Use it for
+  timing-isolation tests, or to let the phone see a status that only exists
+  while a request is in flight.
+- While `loop()` blocks (for example a 10 s scale scan when no scale is in
+  range), the grinder client doesn't run, though on the device it would. Give
+  grinder scenarios a `FakeScale` so `loop()` stays responsive.
 
 ## Writing a scenario
 
@@ -100,6 +129,15 @@ Useful helpers:
   `countWrites`, `events()`. Tare commands zero its reported weight.
 - **FakePhone**: `writeByte`/`writeString` by UUID (`"0xFF11"`), `readByte`,
   `history`, `byteChanges`, `disconnect`.
+- **FakeGrinder** (registers itself at `192.168.1.30:30001`, pairingId 42 by
+  default): `addJob`, `failNext(count, Fault, operation)`, `unreachable`,
+  `onRequest`, `received(operation)`, `count`, `dones()`, `isTaken`, `exists`.
+  It drops untaken jobs after 60 s and re-lists taken jobs every 50 s, in
+  simulated time. Sketch helpers: `preloadGrinder(g)`, `bootWithGrinder(scale, g)`,
+  `runLoopDuringRequests(g, ms)`.
+- **HTTP / WiFi / tasks**: `fakehttp::requests()` (with URL, headers, body,
+  TLS settings and sender context), `fake::setWifiConnectsOnBegin`,
+  `fake::setWifiStatus`, `fake::tasks()`.
 - **BLE stack** (namespace `fakeble::`): `addPeripheral`, `setBeginResults`,
   `beginCallTimes`, `scanCount`, `advertiseCount`.
 
