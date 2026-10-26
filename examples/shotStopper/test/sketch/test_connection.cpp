@@ -63,3 +63,16 @@ TEST(ble_init_failure_is_retried_every_3s) {
   CHECK(times[2] - times[1] <= 3010);
   CHECK_EQ(fakeble::advertiseCount(), 1);  // config service comes up with it
 }
+
+TEST(scale_search_is_short_and_repeats_once_a_second) {
+  // Upstream c854fb8: init() scans for ~100 ms instead of blocking 10 s, and
+  // the sketch tries again every second, so loop() keeps running meanwhile.
+  boot();
+  runFor(1000);
+  int scans = fakeble::scanCount();
+  unsigned long loopsBefore = millis();
+  runFor(10000);
+  CHECK(fakeble::scanCount() - scans >= 9);
+  CHECK(fakeble::scanCount() - scans <= 11);
+  CHECK(millis() - loopsBefore < 10200);  // no 10 s stalls
+}

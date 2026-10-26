@@ -69,8 +69,8 @@ build/       output (gitignored)
 
 - the code calls `delay()` (the sketch's `loop()` does this on every pass,
   through `checkOTAMode`);
-- `BLE.available()` finds nothing new (10 ms per call, so the 10 s scale scan
-  finishes);
+- `BLE.available()` finds nothing new (10 ms per call, so the library's
+  100 ms scale scan finishes);
 - a test calls `fake::advance(ms)`, `runFor(ms)` or `runUntil(cond, ms)`.
 
 ## The grinder client's task
@@ -88,9 +88,9 @@ Two consequences:
   `loop()` keeps running, the way core 1 does while core 0 waits. Use it for
   timing-isolation tests, or to let the phone see a status that only exists
   while a request is in flight.
-- While `loop()` blocks (for example a 10 s scale scan when no scale is in
-  range), the grinder client doesn't run, though on the device it would. Give
-  grinder scenarios a `FakeScale` so `loop()` stays responsive.
+- While `loop()` blocks (a scale scan, ~100 ms, or the momentary 300 ms
+  pulse), the grinder client doesn't run, though on the device it would.
+  Grinder scenarios usually include a `FakeScale` anyway.
 
 ## Writing a scenario
 
@@ -150,8 +150,6 @@ files automatically.
 Some tests document current behavior that looks like a bug, so a fix shows up
 as a deliberate test change:
 
-- `rejected_scale_names_including_felicita`: the name filter has no Felicita
-  prefix.
 - `disconnect_drops_the_link_but_isConnected_stays_true`: the library's
   `disconnect()` doesn't clear `isConnected()`.
 - `ssid_of_32_chars_erases_the_stored_password`: a 32-character SSID's

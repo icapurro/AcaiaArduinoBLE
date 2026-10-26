@@ -69,6 +69,7 @@
 #define LOW_VOLTAGE false      // Reduce CPU clock to lower V3 power draw (~130mA→100mA)
 
 #define TIMER_ONLY false      // disables brew by weight functionality, and only automates the timer/tare
+#define CAN_TARE_START_TIMER false // If set, reset timer, start timer and tare are done in one command (supported by Bookoo scales only)
 
 // Board Hardware
 #ifdef ARDUINO_ESP32S3_DEV
@@ -140,6 +141,7 @@ int OFF[3] = {0,0,0};
 int currentColor[3] = {0,0,0};
 
 AcaiaArduinoBLE scale(DEBUG);
+static unsigned long lastConnectAttempt = 0;
 float currentWeight = 0;
 uint8_t goalWeight = 0;      // Goal Weight to be read from EEPROM
 float weightOffset = 0;
@@ -646,6 +648,11 @@ void loop() {
   if (!scale.isConnected()) {
     updateScaleStatus(STATUS_DISCONNECTED);
     setColor(RED);
+    // init() now scans for ~100 ms instead of blocking for 10 s; try once a second
+    if (millis() - lastConnectAttempt < 1000) {
+      return;
+    }
+    lastConnectAttempt = millis();
     scale.init(); 
     currentWeight = 0;
     if(shot.brewing){
@@ -758,9 +765,9 @@ void loop() {
     buttonLatched = true;
     Serial.println("Button Latched");
     digitalWrite(OUT,HIGH); Serial.println("wrote high");
-    // Get the scale to beep to inform user.
+    // Get the scale to beep to inform user (a tare on Acaia scales).
     if(autoTare){
-      scale.tare();
+      scale.beep();
     }
   }
 
@@ -847,10 +854,14 @@ void setBrewingState(bool brewing){
     shot.start_timestamp_s = seconds_f();
     shot.shotTimer = 0;
     shot.datapoints = 0;
-    scale.resetTimer();
-    scale.startTimer();
-    if(autoTare){
-      scale.tare();
+    if (CAN_TARE_START_TIMER && autoTare) {
+      scale.tareStartTimer();
+    } else {
+      scale.resetTimer();
+      scale.startTimer();
+      if(autoTare){
+        scale.tare();
+      }
     }
     Serial.println("Weight Timer End");
   }else{

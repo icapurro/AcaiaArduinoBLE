@@ -152,3 +152,29 @@ TEST(offset_unchanged_when_error_too_large) {
   CHECK_NEAR(weightOffset, 1.5, 1e-6);
   CHECK_EQ(fake::eepromFlash(sketch::kOffsetAddr), (uint8_t)15);
 }
+
+TEST(latching_shot_on_bookoo_beeps_at_latch_instead_of_taring) {
+  // Upstream c39a364: the latch signals the user with scale.beep(). On a
+  // Bookoo that's a real beep, so the shot keeps its start-of-shot tare and
+  // the 34.5 g target comes 17.25 s after the shot starts (2 g/s).
+  FakeScale scale(ScaleType::GENERIC);
+  Espresso cup(latchingPump);
+  scale.setWeight(cup.weight());
+  bootConnected(scale);
+
+  unsigned long pressedAt = millis();
+  pressBrew();
+  REQUIRE(runUntil(outHigh, 5000));
+  releaseBrew();
+  REQUIRE(runUntil(outLow, 40000));
+  CHECK_EQ(scale.countWrites(acaia::TARE_GENERIC), 1);         // shot start only
+  CHECK_EQ(scale.countWrites(acaia::BEEP_LEVEL_1_BOOKOO), 1);  // at the latch
+  CHECK_EQ(scale.countWrites(acaia::TARE_START_TIMER_BOOKOO), 0);  // CAN_TARE_START_TIMER is off
+  unsigned long startedAt = 0;
+  for (auto& w : scale.writes())
+    if (w.bytes == acaia::TARE_GENERIC && w.timeMs >= pressedAt) startedAt = w.timeMs;
+  unsigned long stoppedAt = outChangedAt(LOW, pressedAt + 1);
+  CHECK(stoppedAt - startedAt >= 17250);
+  CHECK(stoppedAt - startedAt <= 17400);
+  CHECK_EQ(lastShotEndReason(), std::string("weight"));
+}

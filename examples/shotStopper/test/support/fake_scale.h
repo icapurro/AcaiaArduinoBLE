@@ -21,7 +21,8 @@ using Bytes = std::vector<uint8_t>;
 enum class ScaleType {
   OLD,      // Lunar (pre-2021): one characteristic 2a80
   NEW,      // Lunar 2021, Pyxis: 49535343-... pair
-  GENERIC,  // Felicita Arc and similar: ff11 notify / ff12 write
+  GENERIC,  // Bookoo Themis and similar: ff11 notify / ff12 write, binary protocol
+  FELICITA, // Felicita Arc: one ffe1 characteristic, ASCII protocol
   NONE,     // advertises a scale name but exposes no known characteristics
 };
 
@@ -49,6 +50,7 @@ class FakeScale : public fakeble::RemotePeripheral {
     unsigned long timeMs;
     std::string uuid;
     Bytes bytes;
+    bool withResponse;  // write request (acknowledged) vs write command
   };
   const std::vector<Write>& writes() const { return writes_; }
   std::vector<Bytes> writtenBytes() const;
@@ -78,7 +80,7 @@ class FakeScale : public fakeble::RemotePeripheral {
   bool hasCharacteristic(const std::string& uuid) override;
   uint8_t properties(const std::string& uuid) override;
   bool subscribe(const std::string& uuid) override;
-  bool write(const std::string& uuid, const uint8_t* data, size_t length) override;
+  bool write(const std::string& uuid, const uint8_t* data, size_t length, bool withResponse) override;
   bool nextNotification(const std::string& uuid, Bytes& out) override;
 
  private:
@@ -110,4 +112,11 @@ extern const Bytes TARE_GENERIC;
 extern const Bytes START_TIMER_GENERIC;
 extern const Bytes STOP_TIMER_GENERIC;
 extern const Bytes RESET_TIMER_GENERIC;
+extern const Bytes TARE_START_TIMER_BOOKOO;
+extern const Bytes BEEP_LEVEL_1_BOOKOO;
+extern const Bytes TARE_FELICITA;
+extern const Bytes START_TIMER_FELICITA;
+extern const Bytes STOP_TIMER_FELICITA;
+extern const Bytes RESET_TIMER_FELICITA;
+extern const Bytes WEIGHT_TIMER_MODE_FELICITA;
 }  // namespace acaia

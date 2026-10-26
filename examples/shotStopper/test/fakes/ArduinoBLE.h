@@ -53,7 +53,8 @@ class RemotePeripheral {
   virtual bool hasCharacteristic(const std::string& uuid) = 0;
   virtual uint8_t properties(const std::string& uuid) = 0;
   virtual bool subscribe(const std::string& uuid) = 0;
-  virtual bool write(const std::string& uuid, const uint8_t* data, size_t length) = 0;
+  // withResponse: a write request (acknowledged) rather than a write command.
+  virtual bool write(const std::string& uuid, const uint8_t* data, size_t length, bool withResponse) = 0;
   // Pops the next pending notification for uuid into out, if there is one.
   virtual bool nextNotification(const std::string& uuid, std::vector<uint8_t>& out) = 0;
 };
@@ -64,6 +65,19 @@ std::string normalizeUuid(const std::string& uuid);
 struct ValueChange {
   unsigned long timeMs;
   std::vector<uint8_t> value;
+};
+
+// The fields of ArduinoBLE's BLERemoteCharacteristic, in its order.
+// AcaiaArduinoBLE::init() casts a BLECharacteristic to {vtable, local*, remote*}
+// and sets remote->properties |= BLEWriteWithoutResponse (its "CharAccess"
+// hack), so the fake BLECharacteristic must have the same layout.
+struct RemoteCharacteristicLayout {
+  void* vtable = nullptr;
+  String uuid;
+  int refCount = 0;
+  uint16_t connectionHandle = 0;
+  uint16_t startHandle = 0;
+  uint8_t properties = 0;
 };
 
 struct CharacteristicState;
@@ -84,6 +98,7 @@ class BLECharacteristic {
  public:
   BLECharacteristic();
   BLECharacteristic(const char* uuid, uint8_t properties, int valueSize, bool fixedLength = false);
+  virtual ~BLECharacteristic() = default;  // ArduinoBLE's has a vtable too (see RemoteCharacteristicLayout)
 
   explicit operator bool() const { return state_ != nullptr; }
 
@@ -110,10 +125,13 @@ class BLECharacteristic {
   BLEDescriptor descriptor(int) { return BLEDescriptor(); }
 
   // Fake internals, used by fakeble:: helpers.
-  explicit BLECharacteristic(std::shared_ptr<fakeble::CharacteristicState> state) : state_(std::move(state)) {}
+  explicit BLECharacteristic(std::shared_ptr<fakeble::CharacteristicState> state);
   const std::shared_ptr<fakeble::CharacteristicState>& state() const { return state_; }
 
  private:
+  // Same order as ArduinoBLE: (vtable,) local, remote. Both point into state_.
+  void* local_ = nullptr;
+  fakeble::RemoteCharacteristicLayout* remote_ = nullptr;
   std::shared_ptr<fakeble::CharacteristicState> state_;
 };
 

@@ -195,8 +195,8 @@ TEST(ota_mode_pauses_grinder_sync) {
 }
 
 TEST(disabled_pauses_grinder_sync) {
-  // With a scale in range, so loop() isn't stuck in 10 s scale scans (the
-  // harness only runs the grinder client between loop() iterations).
+  // With a scale in range, as in real use (the harness only runs the grinder
+  // client between loop() iterations).
   FakeScale scale(ScaleType::NEW);
   scale.setWeight([](unsigned long) { return 0.0f; });
   FakeGrinder g;

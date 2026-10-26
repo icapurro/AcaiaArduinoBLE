@@ -18,6 +18,7 @@ struct CharacteristicState {
 
   // Remote characteristics belong to a peripheral; local ones to the sketch.
   RemotePeripheral* peripheral = nullptr;
+  RemoteCharacteristicLayout remote;  // remote: discovered properties, as ArduinoBLE holds them
 
   bool written = false;              // local: set by a central's write
   std::vector<ValueChange> history;  // local: values the sketch wrote
@@ -125,9 +126,18 @@ using fakeble::registry;
 
 BLECharacteristic::BLECharacteristic() = default;
 
+BLECharacteristic::BLECharacteristic(std::shared_ptr<fakeble::CharacteristicState> state) : state_(std::move(state)) {
+  if (state_ && state_->peripheral) {
+    remote_ = &state_->remote;
+  } else {
+    local_ = state_.get();
+  }
+}
+
 BLECharacteristic::BLECharacteristic(const char* uuid, uint8_t properties, int valueSize, bool fixedLength)
     : state_(std::make_shared<fakeble::CharacteristicState>()) {
   (void)fixedLength;
+  local_ = state_.get();
   state_->uuid = uuid;
   state_->key = fakeble::normalizeUuid(uuid);
   state_->properties = properties;
@@ -138,7 +148,7 @@ const char* BLECharacteristic::uuid() const { return state_ ? state_->uuid.c_str
 
 uint8_t BLECharacteristic::properties() const {
   if (!state_) return 0;
-  if (state_->peripheral) return state_->peripheral->properties(state_->key);
+  if (state_->peripheral) return state_->remote.properties;
   return state_->properties;
 }
 
@@ -154,11 +164,16 @@ int BLECharacteristic::readValue(uint8_t value[], int length) {
 }
 
 int BLECharacteristic::writeValue(const uint8_t value[], int length, bool withResponse) {
-  (void)withResponse;
   if (!state_ || length < 0) return 0;
   if (state_->peripheral) {
     if (!state_->peripheral->connected()) return 0;
-    return state_->peripheral->write(state_->key, value, static_cast<size_t>(length)) ? 1 : 0;
+    // As BLERemoteCharacteristic::writeValue in ArduinoBLE 1.4.1: a write
+    // request if it's writable and a response is wanted, else a write command
+    // if the characteristic allows that, else nothing.
+    uint8_t props = state_->remote.properties;
+    bool request = (props & BLEWrite) && withResponse;
+    if (!request && !(props & BLEWriteWithoutResponse)) return 0;
+    return state_->peripheral->write(state_->key, value, static_cast<size_t>(length), request) ? 1 : 0;
   }
   // Local: ArduinoBLE truncates to the characteristic's size.
   size_t n = std::min(static_cast<size_t>(length), state_->valueSize);
@@ -266,6 +281,8 @@ BLECharacteristic BLEDevice::characteristic(const char* uuid) const {
   s->uuid = uuid;
   s->key = key;
   s->peripheral = state_->peripheral;
+  s->remote.uuid = String(uuid);
+  s->remote.properties = state_->peripheral->properties(key);
   return BLECharacteristic(s);
 }
 

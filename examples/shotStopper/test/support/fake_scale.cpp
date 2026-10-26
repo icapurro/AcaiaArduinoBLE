@@ -17,6 +17,13 @@ const Bytes TARE_GENERIC = {0x03, 0x0a, 0x01, 0x00, 0x00, 0x08};
 const Bytes START_TIMER_GENERIC = {0x03, 0x0a, 0x04, 0x00, 0x00, 0x0a};
 const Bytes STOP_TIMER_GENERIC = {0x03, 0x0a, 0x05, 0x00, 0x00, 0x0d};
 const Bytes RESET_TIMER_GENERIC = {0x03, 0x0a, 0x06, 0x00, 0x00, 0x0c};
+const Bytes TARE_START_TIMER_BOOKOO = {0x03, 0x0a, 0x07, 0x00, 0x00, 0x00};
+const Bytes BEEP_LEVEL_1_BOOKOO = {0x03, 0x0a, 0x02, 0x00, 0x01, 0x0a};
+const Bytes TARE_FELICITA = {0x54};
+const Bytes START_TIMER_FELICITA = {0x52};
+const Bytes STOP_TIMER_FELICITA = {0x53};
+const Bytes RESET_TIMER_FELICITA = {0x43};
+const Bytes WEIGHT_TIMER_MODE_FELICITA = {0x32};
 }  // namespace acaia
 
 namespace {
@@ -25,9 +32,8 @@ std::string defaultName(ScaleType type) {
   switch (type) {
     case ScaleType::OLD: return "LUNAR-FAKE";
     case ScaleType::NEW: return "PYXIS-FAKE";
-    // isScaleName() has no Felicita prefix, so a generic scale has to
-    // advertise one of the accepted names to be found at all.
-    case ScaleType::GENERIC: return "PROCH-FAKE";
+    case ScaleType::GENERIC: return "BOOKOO_SC-FAKE";
+    case ScaleType::FELICITA: return "FELICITA-FAKE";
     case ScaleType::NONE: return "ACAIA-FAKE";
   }
   return "";
@@ -43,6 +49,7 @@ std::string FakeScale::readUuid(ScaleType type) {
     case ScaleType::OLD: return "2a80";
     case ScaleType::NEW: return "49535343-1e4d-4bd9-ba61-23c647249616";
     case ScaleType::GENERIC: return "ff11";
+    case ScaleType::FELICITA: return "ffe1";
     case ScaleType::NONE: return "";
   }
   return "";
@@ -53,6 +60,7 @@ std::string FakeScale::writeUuid(ScaleType type) {
     case ScaleType::OLD: return "2a80";
     case ScaleType::NEW: return "49535343-8841-43f4-a8d4-ecbe34729bb3";
     case ScaleType::GENERIC: return "ff12";
+    case ScaleType::FELICITA: return "ffe1";
     case ScaleType::NONE: return "";
   }
   return "";
@@ -90,6 +98,18 @@ Bytes FakeScale::encodeWeight(ScaleType type, float grams) {
       p[0] = 0x01; p[1] = 0x02;
       p[6] = negative ? '-' : '+';
       p[7] = (raw >> 16) & 0xff; p[8] = (raw >> 8) & 0xff; p[9] = raw & 0xff;
+      return p;
+    }
+    case ScaleType::FELICITA: {
+      // 18 ASCII bytes: [2] '-' if negative, [3..8] six digits of hundredths
+      unsigned raw = static_cast<unsigned>(std::lround(magnitude * 100)) % 1000000;
+      Bytes p(18, ' ');
+      p[0] = 0x01; p[1] = 0x02;
+      p[2] = negative ? '-' : '+';
+      for (int i = 8; i >= 3; i--) {
+        p[i] = static_cast<uint8_t>('0' + raw % 10);
+        raw /= 10;
+      }
       return p;
     }
     case ScaleType::NONE: return Bytes();
@@ -140,7 +160,9 @@ uint8_t FakeScale::properties(const std::string& uuid) {
   uint8_t props = 0;
   if (!hasCharacteristic(uuid)) return props;
   if (uuid == readUuid(type_)) props |= BLERead | BLENotify;
-  if (uuid == writeUuid(type_)) props |= BLEWrite | BLEWriteWithoutResponse;
+  // Write requests only, as advertised: the library's CharAccess hack adds
+  // BLEWriteWithoutResponse itself to send commands without waiting.
+  if (uuid == writeUuid(type_)) props |= BLEWrite;
   return props;
 }
 
@@ -151,13 +173,21 @@ bool FakeScale::subscribe(const std::string& uuid) {
   return true;
 }
 
-bool FakeScale::write(const std::string& uuid, const uint8_t* data, size_t length) {
+bool FakeScale::write(const std::string& uuid, const uint8_t* data, size_t length, bool withResponse) {
   if (failWrites || uuid != writeUuid(type_)) return false;
   Bytes bytes(data, data + length);
-  writes_.push_back({millis(), uuid, bytes});
+  writes_.push_back({millis(), uuid, bytes, withResponse});
   events_.push_back("write " + uuid);
-  const Bytes& tare = type_ == ScaleType::GENERIC ? acaia::TARE_GENERIC : acaia::TARE;
-  if (bytes == tare) tareOffset_ = rawWeightNow();
+  // Commands that zero the scale. On Acaia scales the library's beep() is a tare.
+  bool tares = false;
+  switch (type_) {
+    case ScaleType::GENERIC:
+      tares = bytes == acaia::TARE_GENERIC || bytes == acaia::TARE_START_TIMER_BOOKOO;
+      break;
+    case ScaleType::FELICITA: tares = bytes == acaia::TARE_FELICITA; break;
+    default: tares = bytes == acaia::TARE; break;
+  }
+  if (tares) tareOffset_ = rawWeightNow();
   return true;
 }
 

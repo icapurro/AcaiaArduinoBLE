@@ -25,18 +25,34 @@ static float deliver(FakeScale& fake, const Bytes& packet, bool* accepted = null
 
 // ---------------------------------------------------------------- 4.1 connect sequence
 
-static void checkConnectSequence(ScaleType type) {
+static void checkAcaiaConnectSequence(ScaleType type) {
   FakeScale fake(type);
   REQUIRE(connectTo(fake));
   CHECK(scale.isConnected());
   std::string r = FakeScale::readUuid(type), w = FakeScale::writeUuid(type);
   CHECK_EQ(fake.events(), (std::vector<std::string>{"connect", "discover", "subscribe " + r, "write " + w, "write " + w}));
   CHECK_EQ(fake.writtenBytes(), (std::vector<Bytes>{acaia::IDENTIFY, acaia::NOTIFICATION_REQUEST}));
+  for (auto& write : fake.writes()) CHECK(write.withResponse);  // the handshake is acknowledged
 }
 
-TEST(connect_sequence_old_lunar) { checkConnectSequence(ScaleType::OLD); }
-TEST(connect_sequence_new_lunar_pyxis) { checkConnectSequence(ScaleType::NEW); }
-TEST(connect_sequence_generic) { checkConnectSequence(ScaleType::GENERIC); }
+TEST(connect_sequence_old_lunar) { checkAcaiaConnectSequence(ScaleType::OLD); }
+TEST(connect_sequence_new_lunar_pyxis) { checkAcaiaConnectSequence(ScaleType::NEW); }
+
+TEST(connect_sequence_generic_sends_no_acaia_handshake) {
+  FakeScale fake(ScaleType::GENERIC);
+  REQUIRE(connectTo(fake));
+  CHECK(fake::serialContains("Generic Scale Detected"));
+  CHECK_EQ(fake.events(), (std::vector<std::string>{"connect", "discover", "subscribe ff11"}));
+  CHECK(fake.writtenBytes().empty());
+}
+
+TEST(connect_sequence_felicita_sets_weight_timer_mode) {
+  FakeScale fake(ScaleType::FELICITA, "FELICITA ARC");
+  REQUIRE(connectTo(fake));
+  CHECK(fake::serialContains("Felicita Arc Detected"));
+  CHECK_EQ(fake.events(), (std::vector<std::string>{"connect", "discover", "subscribe ffe1", "write ffe1"}));
+  CHECK_EQ(fake.writtenBytes(), (std::vector<Bytes>{acaia::WEIGHT_TIMER_MODE_FELICITA}));
+}
 
 TEST(connect_by_mac_address_only_finds_that_scale) {
   FakeScale other(ScaleType::NEW, "PYXIS-OTHER", "aa:aa:aa:aa:aa:aa");
@@ -73,7 +89,7 @@ TEST(scale_without_known_characteristics_is_rejected) {
 }
 
 TEST(accepted_scale_name_prefixes) {
-  for (const char* name : {"CINCO-1", "ACAIA-1", "PYXIS-1", "LUNAR-1", "PEARL-1", "PROCH-1", "BOOKO-1"}) {
+  for (const char* name : {"CINCO-1", "ACAIA-1", "PYXIS-1", "LUNAR-1", "PEARL-1", "PROCH-1", "BOOKO-1", "FELIC-1"}) {
     auto fake = std::make_unique<FakeScale>(ScaleType::NEW, name);
     CHECK(connectTo(*fake));
     CHECK_EQ(fake->connectCount(), 1);
@@ -83,29 +99,26 @@ TEST(accepted_scale_name_prefixes) {
   }
 }
 
-TEST(rejected_scale_names_including_felicita) {
-  // Current behavior: isScaleName() has no Felicita prefix, so an Arc
-  // advertising "FELICITA..." is never connected even though the GENERIC
-  // protocol is meant for it.
-  FakeScale felicita(ScaleType::GENERIC, "FELICITA ARC");
+TEST(rejected_scale_names) {
   FakeScale lowercase(ScaleType::NEW, "pyxis-1");
   FakeScale phone(ScaleType::NEW, "iPhone");
-  fakeble::addPeripheral(&felicita);
   fakeble::addPeripheral(&lowercase);
   fakeble::addPeripheral(&phone);
   BLE.begin();
   CHECK(!scale.init());
-  CHECK_EQ(felicita.connectCount() + lowercase.connectCount() + phone.connectCount(), 0);
+  CHECK_EQ(lowercase.connectCount() + phone.connectCount(), 0);
 }
 
 // ---------------------------------------------------------------- 4.3 failure paths
 
-TEST(no_scale_times_out_after_ten_seconds_of_simulated_time) {
+TEST(no_scale_gives_up_after_100ms_and_stops_scanning) {
+  // Non-blocking init(): one short scan per call; the sketch retries.
   BLE.begin();
   CHECK(!scale.init());
-  CHECK(millis() >= 10000UL);
-  CHECK(millis() < 10100UL);
+  CHECK(millis() >= 100UL);
+  CHECK(millis() < 200UL);
   CHECK(fake::serialContains("failed to find scale"));
+  CHECK(!fakeble::scanning());
 }
 
 TEST(connect_failure) {
@@ -171,32 +184,53 @@ TEST(disconnect_drops_the_link_but_isConnected_stays_true) {
 // ---------------------------------------------------------------- 4.4 command bytes
 
 static void checkCommands(ScaleType type, const Bytes& tare, const Bytes& start, const Bytes& stop,
-                          const Bytes& reset) {
+                          const Bytes& reset, const Bytes& beep) {
   FakeScale fake(type);
   REQUIRE(connectTo(fake));
+  size_t before = fake.writes().size();
   CHECK(scale.tare());
   CHECK(scale.startTimer());
   CHECK(scale.stopTimer());
   CHECK(scale.resetTimer());
+  CHECK(scale.beep());
   CHECK(scale.heartbeat());
   auto writes = fake.writtenBytes();
-  REQUIRE(writes.size() == 7);
-  CHECK_EQ(writes[2], tare);
-  CHECK_EQ(writes[3], start);
-  CHECK_EQ(writes[4], stop);
-  CHECK_EQ(writes[5], reset);
-  CHECK_EQ(writes[6], acaia::HEARTBEAT);
+  REQUIRE(writes.size() == before + 6);
+  CHECK_EQ(writes[before], tare);
+  CHECK_EQ(writes[before + 1], start);
+  CHECK_EQ(writes[before + 2], stop);
+  CHECK_EQ(writes[before + 3], reset);
+  CHECK_EQ(writes[before + 4], beep);
+  CHECK_EQ(writes[before + 5], acaia::HEARTBEAT);
+  // Commands go out as write commands (no acknowledgement to wait for): the
+  // library's CharAccess hack enabled BLEWriteWithoutResponse on the
+  // write-only characteristic. Also proves the hack hit the right memory.
+  for (size_t i = before; i < fake.writes().size(); i++) CHECK(!fake.writes()[i].withResponse);
 }
 
 TEST(command_bytes_old_lunar) {
-  checkCommands(ScaleType::OLD, acaia::TARE, acaia::START_TIMER, acaia::STOP_TIMER, acaia::RESET_TIMER);
+  checkCommands(ScaleType::OLD, acaia::TARE, acaia::START_TIMER, acaia::STOP_TIMER, acaia::RESET_TIMER, acaia::TARE);
 }
 TEST(command_bytes_new_lunar_pyxis) {
-  checkCommands(ScaleType::NEW, acaia::TARE, acaia::START_TIMER, acaia::STOP_TIMER, acaia::RESET_TIMER);
+  checkCommands(ScaleType::NEW, acaia::TARE, acaia::START_TIMER, acaia::STOP_TIMER, acaia::RESET_TIMER, acaia::TARE);
 }
 TEST(command_bytes_generic) {
   checkCommands(ScaleType::GENERIC, acaia::TARE_GENERIC, acaia::START_TIMER_GENERIC, acaia::STOP_TIMER_GENERIC,
-                acaia::RESET_TIMER_GENERIC);
+                acaia::RESET_TIMER_GENERIC, acaia::BEEP_LEVEL_1_BOOKOO);
+}
+TEST(command_bytes_felicita_are_single_ascii_bytes) {
+  // beep() has no Felicita command: it sends the 6-byte Acaia tare (upstream behavior).
+  checkCommands(ScaleType::FELICITA, acaia::TARE_FELICITA, acaia::START_TIMER_FELICITA, acaia::STOP_TIMER_FELICITA,
+                acaia::RESET_TIMER_FELICITA, acaia::TARE);
+}
+
+TEST(tare_start_timer_is_one_bookoo_command) {
+  FakeScale fake(ScaleType::GENERIC);
+  fake.setWeight([](unsigned long) { return 12.0f; });
+  REQUIRE(connectTo(fake));
+  CHECK(scale.tareStartTimer());
+  CHECK_EQ(fake.writtenBytes().back(), acaia::TARE_START_TIMER_BOOKOO);
+  CHECK_NEAR(fake.tareOffset(), 12.0, 1e-6);
 }
 
 // ---------------------------------------------------------------- 4.5 heartbeat / timeout
@@ -345,3 +379,24 @@ static void checkRoundTrip(ScaleType type, double tolerance) {
 TEST(fake_scale_packets_round_trip_through_decoder_old) { checkRoundTrip(ScaleType::OLD, 0.051); }
 TEST(fake_scale_packets_round_trip_through_decoder_new) { checkRoundTrip(ScaleType::NEW, 0.051); }
 TEST(fake_scale_packets_round_trip_through_decoder_generic) { checkRoundTrip(ScaleType::GENERIC, 0.0051); }
+TEST(fake_scale_packets_round_trip_through_decoder_felicita) { checkRoundTrip(ScaleType::FELICITA, 0.0051); }
+
+TEST(decodes_felicita_ascii_packets) {
+  FakeScale fake(ScaleType::FELICITA, "FELICITA ARC");
+  REQUIRE(connectTo(fake));
+  auto packet = [](const char* text) {  // 18 bytes: 2 header bytes, sign, 6 digits of hundredths, padding
+    Bytes p(18, ' ');
+    p[0] = 0x01; p[1] = 0x02;
+    for (size_t i = 0; text[i]; i++) p[2 + i] = static_cast<uint8_t>(text[i]);
+    return p;
+  };
+  bool ok = false;
+  CHECK_NEAR(deliver(fake, packet("+003645"), &ok), 36.45, 1e-3);
+  CHECK(ok);
+  CHECK_NEAR(deliver(fake, packet("-000250"), &ok), -2.5, 1e-3);
+  CHECK(ok);
+  Bytes shortPacket = packet("+001000");
+  shortPacket.resize(13);
+  CHECK_NEAR(deliver(fake, shortPacket, &ok), -2.5, 1e-3);  // wrong length: ignored
+  CHECK(!ok);
+}
