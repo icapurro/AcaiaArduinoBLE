@@ -1,5 +1,5 @@
 # AcaiaArduinoBLE
-Acaia / Bookoo Scale Gateway using the ArduinoBLE library for devices such as the esp32, arduino nano esp32, and arduino nano iot 33.
+Acaia / Bookoo / Felicita Scale Gateway using the ArduinoBLE library for esp32-based devices.
 This is an Arduino Library which can be found in the Arduino IDE Library Manager.
 
 ## Scale Compatibility
@@ -7,18 +7,17 @@ This is an Arduino Library which can be found in the Arduino IDE Library Manager
 | Mfr    | Model   | Submodel | Firmware | Connection Performance | Auto-Tare | Auto-Start/Stop Timer | Auto-Reset Timer |
 | ------ | ------- | ------- |------- |------ | ------ |------ |------ |
 | Acaia  | Lunar   | USB-Micro <br>(Pre-2021) | v2.6.019 | Great | Yes | Yes | Untested
-| Acaia  | Lunar   | USB-C <br> (2021 version)  | v1.0.016 | Ok    | Yes | Yes | Yes
+| Acaia  | Lunar   | USB-C <br> (2021 version)  | v1.0.016 | Hit or Miss    | Yes | Yes | Yes
 | Acaia  | Pearl S | USB-Micro                  | v1.0.056 | Ok    | Yes | Yes | Yes
 | Acaia  | Pearl S | USB-C                      | ----     | Ok    | Yes | Yes  | Yes
 | Acaia  | Pyxis   | ----                       | v1.0.022 | Good  | Not Recommended (too sensitive) | Yes | Yes
 | Bookoo | Themis  Mini | ----                       | v1.0.5   | Great | Yes | Yes | Yes 
 | Bookoo | Themis Ultra  | ----                 | ----   | Great | Yes | Yes | Yes 
+| Felicita | Arc   | ----                       | ----   | ---- | Yes | Yes | Yes 
 
 
 ## Requirements
 This library is intended to be used with any arduino device which is compatible with the [ArduinoBLE](https://www.arduino.cc/reference/en/libraries/arduinoble/) library.
-
-As of version V2.0.0, non-volatile storage for the setpoint and offset is only available for ESP32-based devices.
 
 ## Printed Circuit Board
 ![shotStopperV3 screenshot](https://github.com/user-attachments/assets/a09fe8fb-3705-44c0-88a2-07c61d67b8f6)
@@ -66,49 +65,45 @@ The following variables at the top of the shotStopper.ino file can be configured
 `TIMER_ONLY`
 * false by default. disables brew-by-weight functionality and enables only automatic timer and tare
 
+## Grind-by-Sync with a Mahlkönig E65/E80 GbS grinder
+
+The shotStopper can stand in for the espresso machine in the grinder's Grind-by-Sync loop. It reports each shot's brew time and final weight to the grinder over WiFi, so the grinder adjusts its grind setting. It uses the grinder's *Generic WiFi* API (HTTPS on port 30001).
+
+Setup:
+
+1. Pair the grinder outside the shotStopper, for example in the companion app. Note the grinder's IP address (give it a fixed address in your router) and the **Pairing ID** shown on the grinder.
+2. Set the WiFi network over BLE (`0xFF22` SSID, `0xFF23` password).
+3. Write the grinder IP address to `0xFF25` (e.g. `192.168.1.30`) and the Pairing ID to `0xFF26` (4 bytes, little-endian). Writing an empty IP turns grinder sync off.
+
+How shots are reported:
+
+* Each Grind-by-Sync grind creates a job, which the shotStopper takes right away. It keeps polling during a shot, so it can take the job again if the grinder lists it again (~50 s after it was last taken).
+* A shot stopped by weight is reported as a success, with its duration and the weight after the drip delay.
+* A flush (shorter than `minShotDurationS`) leaves the job for the real shot.
+* Any other ending (button, max duration) is reported as canceled, so the grinder doesn't learn from it.
+* A job no shot uses within 5 minutes is canceled.
+
+`0xFF27` (read/notify) shows the grinder link status:
+
+| Value | Meaning |
+| --- | --- |
+| 0 | not configured |
+| 1 | connecting to WiFi |
+| 2 | grinder unreachable |
+| 3 | pairing rejected (pair again, then update the Pairing ID) |
+| 4 | ready |
+| 5 | job taken (a grind is waiting for its shot) |
+| 6 | reporting a shot |
+
+OTA mode still pauses everything else, grinder sync included. Requires the ArduinoJson 7 library.
+
 ## Demo
 
 You can find a demo on Youtube:
 
 [![Video showing an shotStopper pulling a shot on a silvia pro](https://img.youtube.com/vi/oP3Cmke6daE/0.jpg)](https://www.youtube.com/shorts/oP3Cmke6daE)
 
-## Project Status
-
-Firmware:
-
-☑ Connect Acaia Pyxis to ESP32
-
-☑ Tare Command
-
-☑ Receive Weight Data
-
-☑ shotStopper Espresso Machine Brew-By-Weight Firmware
-
-☑ Compatibility with Lunar (Pre-2021)
-
-☑ Compatibility with Lunar 2021
-
-☑ Positive *and* negative weight support
-
-☑ Latching-switch support (LM Mini, LM Micra, etc)
-
-☑ Auto-reconnect
-
-☑ change setpoint over bluetooth
-
-☑ maintain setpoint and offset after powercycle
-
-☑ auto start/stop timer
-
-☑ flowrate-based shot end-time
-
-☑ auto timer reset
-
-⬜ Improve Pyxis Tare Command Reliability
-
-
-
-Scale Compatibility:
+## Scale Compatibility:
 
 ☑ Acaia Pyxis
 
@@ -118,56 +113,13 @@ Scale Compatibility:
 
 ☑ Pearl S
 
-❌ Felicita Arc (buggy, see bug report)
+☑ Felicita Arc
 
 ☑ Bookoo
 
-Hardware:
-
-☑ PCB Design for Low Voltage Switches (V1.1)
-
-☑ 3D-Printed Half Case
-
-☑ Compatibility with La Marzocco GS3 AV
-
-☑ Compatibility with Rancilio Silvia Pro (and Pro X)
-
-❌ Compatibility with La Marzocco Linea Classic S (Not Compatible, requires investigation)
-
-☑ Compatibility with Stone Espresso (requires reed switch)
-
-☑ Compatibility with La Marzocco Mini
-
-☑ Compatibility with La Marzocco Micra (V2.0)
-
-☑ Powered by espresso machine (V2.0)
-
-☑ Reed switch input (V2.0)
-
-☑ on-board esp32 module (V3.0)
-
-⬜ Compatibility with Breville (presumed but untested)
-
-⬜ Support for High-Voltage Switches (Hall-Effect Sensor and SSR?)
-
-Sales:
-
-☑ Beta Users Determined
-
-☑ Beta Units Built
-
-☑ Beta Units Shipped
-
-☑ Beta Test Complete
-
-☑ Sales Open For GS3, Silvia, and Micra In the US
-
-☑ Sales Open for Linea Mini
-
-☑ International Sales Open 
 
 ## Bugs/Missing
-1. Tare command is less reliable than pressing the tare button.
+1. Tare command is less reliable than pressing the tare button for pyxis
 2. Only supports grams.
 
 # Acknowledgement
@@ -175,9 +127,9 @@ This is largely a basic port of the  [LunarGateway](https://github.com/frowin/Lu
 
 In addition to some minor notes from [pyacaia](https://github.com/lucapinello/pyacaia) library written for raspberryPI.
 
-Felicita Arc support contributions from baettigp
+Felicita Arc support contributions from baettigp and A-TWJ
 
-Bookoo contributions from philgood
+Bookoo contributions from philgood and same31
 
 lunar 2019 contributions from jniebuhr
 

@@ -105,10 +105,19 @@ void connectToWifi(String wifiSsid, String wifiPass) {
             return;
         }
         if (!wifiConnecting) {
-            Serial.print("Connecting to WiFi: ");
-            Serial.println(wifiSsid);
-            WiFi.begin(wifiSsid, wifiPass);
             wifiConnecting = true;
+            if (WiFi.status() == WL_CONNECTED) {
+                // Already up (grinder sync keeps WiFi connected): reuse it.
+                Serial.println("WiFi already connected");
+            } else {
+                Serial.print("Connecting to WiFi: ");
+                Serial.println(wifiSsid);
+                // Stop any attempt in progress (e.g. grinder sync's), or begin()
+                // fails with "sta is connecting, cannot set config".
+                WiFi.disconnect();
+                delay(100);
+                WiFi.begin(wifiSsid, wifiPass);
+            }
         }
         if (wifiConnecting && WiFi.status() == WL_CONNECTED) {
             wifiConnecting = false;

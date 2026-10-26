@@ -1,0 +1,7 @@
+# macOS Finder metadata
+.DS_Store
+
+# Arduino IDE "Sketch > Export Compiled Binary" output: one folder per board
+# (e.g. build/esp32.esp32.esp32s3/). The release binaries and flash.bat kept
+# directly in build/ are tracked on purpose.
+examples/*/build/*/
